@@ -1,0 +1,113 @@
+repositories {
+    mavenCentral()
+    mavenLocal()
+}
+
+plugins {
+    id 'java'
+    id 'eclipse'
+    id 'idea'
+    id 'project-report'
+    id 'jacoco'
+
+    id 'ambry.license'
+    id 'ambry.dependency-versions'
+    id 'ambry.ci-release' apply !project.hasProperty("disableShipkit")
+    id 'ambry.java-publishing' apply !prject.hasProperty("disableShipkit")
+}
+
+
+sourceCompatibility = 1.8
+targetCompatibility = 1.8
+
+if (JavaVersion.current().java9Compatible) {
+    // Our consumers still run on java 8, so this flag ensures that our builds are backwards compatible at runtime
+    // with java 8 platform APIs.
+    compileJava {
+        options.compilerArgs.addAll(['--release', '8'])
+    }
+}
+
+java {
+    withJavadocJar()
+    withSourcesJar()
+}
+
+sourceSets {
+    // separate source set for integration tests
+    intTest {
+        java.srcDir file('src/integration-test/java')
+        resources.srcDir file('src/integration-test/resources')
+        compileClasspath += sourceSets.main.output + sourceSets.test.output
+        runtimeClasspath += sourceSets.main.output + sourceSets.test.output
+    }
+}
+
+configurations {
+    // These configurations allow for the integration test source set to be compiled and run as a test suite.
+    // Integration tests should be able to get the same dependencies as the corresponding unit tests.
+    intTestImplementation.extendsFrom testImplementation
+    intTestRuntimeOnly.extendsFrom testRuntimeOnly
+}
+
+
+
+dependencies {
+    implementation "org.slf4j:slf4j-api:$slf4jVersion"
+    testImplementaion "log4j:log4j:$log4jVersion"
+    testImplementation "org.slf4j:slf4j-log4j12:$slf4jVersion"
+    testImplementation "junit:junit:$junitVersion"
+    testImplementation "org.mockito:mockito-core:2.+"
+    testRuntimeOnly project(':log4j-test-config')
+}
+
+
+idea {
+    // since integration tests are in a separate source set, we have to tell intellij about them
+    module {
+        testSourceDirs += sourceSets.intTest.java.srcDirs
+        testResourceDirs += sourceSets.intTest.resources.srcDirs
+        scopes.TEST.plus += [configurations.intTestCompile]
+    }
+}
+
+test {
+    testLogging {
+        exceptionFormat = 'full'
+    }
+    maxHeapSize = "3g"
+    systemProperty 'io.netty.leakDetection.level', 'paranoid'
+    systemProperty 'io.netty.allocator.tinyCacheSize', '0'
+    systemProperty 'io.netty.allocator.smallCacheSize', '0'
+    systemProperty 'io.netty.allocator.normalCacheSize', '0'
+    systemProperty 'io.netty.allocator.maxCachedBufferCapacity', '0'
+}
+
+task intTest(type: Test) {
+    description = 'Runs integration tests.'
+    group = 'verification'
+    testClassesDirs = sourceSets.intTest.output.classesDirs
+    classpath = sourceSets.intTest.runtimeClasspath
+    testLogging {
+        exceptionFormat = 'full'
+        events 'started', 'failed', 'passed', 'skipped'
+        showStandardStreams = false
+    }
+    maxHeapSize = "3g"
+    systemProperty 'io.netty.leakDetection.level', 'paranoid'
+}
+
+task allTest {
+    description = 'Runs unit and integration tests'
+    group = 'verification'
+}
+allTest.dependsOn test
+allTest.dependsOn intTest
+
+javadoc {
+    // TODO audit and fix our javadocs so that we don't need this setting
+    // This is mainly for cases where param/throws tags don't have descriptions
+    // Previously, javadocs weren't being compiled, but now shipkit automatically enables this build step
+    options.addStringOption('Xdoclint:none', '-quiet') // Suppress lint warnings
+    failOnError = false
+}

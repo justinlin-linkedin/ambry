@@ -492,7 +492,7 @@ project(':ambry-all') {
     }
 }
 
-subprojects.each { subproject -> evaluationDependsOn(subproject.path)}
+//subprojects.each { subproject -> evaluationDependsOn(subproject.path)}
 
 task allJar(type: Jar, dependsOn: subprojects.assemble) {
     manifest {
