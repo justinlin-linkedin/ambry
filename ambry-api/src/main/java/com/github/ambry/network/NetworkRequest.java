@@ -27,6 +27,8 @@ public interface NetworkRequest {
    */
   InputStream getInputStream();
 
+  ByteBuf content();
+
   /**
    * Gets the start time in ms when this request started
    * @return The start time in ms when the request started

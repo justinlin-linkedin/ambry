@@ -16,10 +16,12 @@ package com.github.ambry.protocol;
 import com.github.ambry.clustermap.ClusterMap;
 import com.github.ambry.commons.BlobId;
 import com.github.ambry.utils.Utils;
+import com.google.protobuf.ByteString;
+import com.google.protobuf.CodedOutputStream;
+import io.netty.buffer.ByteBuf;
+import io.netty.buffer.PooledByteBufAllocator;
 import java.io.DataInputStream;
 import java.io.IOException;
-import java.nio.ByteBuffer;
-import java.nio.channels.WritableByteChannel;
 
 import static com.github.ambry.protocol.RequestOrResponseType.TtlUpdateRequest;
 
@@ -137,6 +139,41 @@ public class TtlUpdateRequest extends RequestOrResponse {
         + clientId + ", " + "CorrelationId=" + correlationId + ", " + "AccountId=" + blobId.getAccountId() + ", "
         + "ContainerId=" + blobId.getContainerId() + ", " + "ExpiresAtMs=" + expiresAtMs + ", " + "OperationTimeMs="
         + operationTimeInMs + "]";
+  }
+
+  @Override
+  public ByteBuf toProtobuf() {
+    RequestOrResponseProto base = RequestOrResponseProto.newBuilder()
+        .setType(RequestOrResponseProto.RequestOrResponseType.TtlUpdateRequest)
+        .setCorrelationId(correlationId)
+        .setVersionId(versionId)
+        .setClientId(clientId)
+        .build();
+    TtlUpdateRequestProto request = TtlUpdateRequestProto.newBuilder()
+        .setRequest(base)
+        .setBlobId(ByteString.copyFrom(blobId.toBytes()))
+        .setExpiredAtMs(expiresAtMs)
+        .setOperationTimeInMs(operationTimeInMs)
+        .build();
+    int size = request.getSerializedSize();
+    ByteBuf byteBuf = PooledByteBufAllocator.DEFAULT.ioBuffer(size);
+    try {
+      int writerIndex = byteBuf.writerIndex();
+      request.writeTo(CodedOutputStream.newInstance(byteBuf.nioBuffer()));
+      byteBuf.writerIndex(writerIndex + size);
+    } catch (IOException e) {
+
+    }
+    return byteBuf;
+  }
+
+  public static TtlUpdateRequest readProtobufFrom(ByteBuf byteBuf, ClusterMap clusterMap) throws IOException {
+    TtlUpdateRequestProto request = TtlUpdateRequestProto.parseFrom(byteBuf.nioBuffer());
+    byteBuf.skipBytes(request.getSerializedSize());
+    RequestOrResponseProto base = request.getRequest();
+    return new TtlUpdateRequest(base.getCorrelationId(), base.getClientId(),
+        new BlobId(request.getBlobId().toString(), clusterMap), request.getExpiredAtMs(),
+        request.getOperationTimeInMs());
   }
 
   /**

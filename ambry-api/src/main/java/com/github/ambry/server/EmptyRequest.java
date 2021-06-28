@@ -15,6 +15,7 @@ package com.github.ambry.server;
 
 import com.github.ambry.network.NetworkRequest;
 import com.github.ambry.utils.SystemTime;
+import io.netty.buffer.ByteBuf;
 import java.io.InputStream;
 
 
@@ -35,6 +36,11 @@ public class EmptyRequest implements NetworkRequest {
 
   @Override
   public InputStream getInputStream() {
+    return null;
+  }
+
+  @Override
+  public ByteBuf content() {
     return null;
   }
 

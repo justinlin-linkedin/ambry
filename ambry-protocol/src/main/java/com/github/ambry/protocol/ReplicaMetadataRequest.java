@@ -14,12 +14,19 @@
 package com.github.ambry.protocol;
 
 import com.github.ambry.clustermap.ClusterMap;
+import com.github.ambry.clustermap.PartitionId;
+import com.github.ambry.clustermap.ReplicaType;
+import com.github.ambry.replication.FindToken;
+import com.github.ambry.replication.FindTokenFactory;
 import com.github.ambry.replication.FindTokenHelper;
 import com.github.ambry.utils.Utils;
+import com.google.protobuf.ByteString;
+import com.google.protobuf.CodedOutputStream;
+import io.netty.buffer.ByteBuf;
+import io.netty.buffer.PooledByteBufAllocator;
+import java.io.ByteArrayInputStream;
 import java.io.DataInputStream;
 import java.io.IOException;
-import java.nio.ByteBuffer;
-import java.nio.channels.WritableByteChannel;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -95,6 +102,62 @@ public class ReplicaMetadataRequest extends RequestOrResponse {
   public long sizeInBytes() {
     return super.sizeInBytes() + Replica_Metadata_Request_Info_List_Size_In_Bytes
         + replicaMetadataRequestInfoListSizeInBytes + Max_Entries_Size_In_Bytes;
+  }
+
+  @Override
+  public ByteBuf toProtobuf() {
+    RequestOrResponseProto base = RequestOrResponseProto.newBuilder()
+        .setType(RequestOrResponseProto.RequestOrResponseType.ReplicaMetadataRequest)
+        .setCorrelationId(correlationId)
+        .setVersionId(versionId)
+        .setClientId(clientId)
+        .build();
+    ReplicaMetadataRequestProto.Builder requestBuilder = ReplicaMetadataRequestProto.newBuilder()
+        .setRequest(base)
+        .setMaxTotalSizeOfEntriesInBytes(maxTotalSizeOfEntriesInBytes);
+    for (ReplicaMetadataRequestInfo replicaMetadataRequestInfo : replicaMetadataRequestInfoList) {
+      ReplicaMetadataRequestInfoProto info = ReplicaMetadataRequestInfoProto.newBuilder()
+          .setToken(ByteString.copyFrom(replicaMetadataRequestInfo.getToken().toBytes()))
+          .setHostName(replicaMetadataRequestInfo.getHostName())
+          .setReplicaPath(replicaMetadataRequestInfo.getReplicaPath())
+          .setReplicaType(replicaMetadataRequestInfo.getReplicaType().ordinal())
+          .setPartitionId(ByteString.copyFrom(replicaMetadataRequestInfo.getPartitionId().getBytes()))
+          .build();
+      requestBuilder.addReplicaMetadataRequestInfoList(info);
+    }
+    ReplicaMetadataRequestProto request = requestBuilder.build();
+    int size = request.getSerializedSize();
+    ByteBuf byteBuf = PooledByteBufAllocator.DEFAULT.ioBuffer(size);
+    try {
+      int writerIndex = byteBuf.writerIndex();
+      request.writeTo(CodedOutputStream.newInstance(byteBuf.nioBuffer()));
+      byteBuf.writerIndex(writerIndex + size);
+    } catch (IOException e) {
+
+    }
+    return byteBuf;
+  }
+
+  public static ReplicaMetadataRequest readProtobufFrom(ByteBuf byteBuf, ClusterMap clusterMap) throws IOException {
+    ReplicaMetadataRequestProto request = ReplicaMetadataRequestProto.parseFrom(byteBuf.nioBuffer());
+    byteBuf.skipBytes(request.getSerializedSize());
+    RequestOrResponseProto base = request.getRequest();
+    List<ReplicaMetadataRequestInfo> requestInfoList =
+        new ArrayList<>(request.getReplicaMetadataRequestInfoListCount());
+    for (ReplicaMetadataRequestInfoProto infoProto : request.getReplicaMetadataRequestInfoListList()) {
+      PartitionId partitionId =
+          clusterMap.getPartitionIdFromStream(new ByteArrayInputStream(infoProto.getPartitionId().toByteArray()));
+      ReplicaType type = ReplicaType.values()[infoProto.getReplicaType()];
+      FindTokenFactory findTokenFactory = clusterMap.getFindTokenHelper().getFindTokenFactoryFromReplicaType(type);
+      FindToken token = findTokenFactory.getFindToken(
+          new DataInputStream(new ByteArrayInputStream(infoProto.getToken().toByteArray())));
+      ReplicaMetadataRequestInfo requestInfo =
+          new ReplicaMetadataRequestInfo(partitionId, token, infoProto.getHostName(), infoProto.getReplicaPath(), type,
+              (short) base.getVersionId());
+      requestInfoList.add(requestInfo);
+    }
+    return new ReplicaMetadataRequest(base.getCorrelationId(), base.getClientId(), requestInfoList,
+        request.getMaxTotalSizeOfEntriesInBytes(), (short) base.getVersionId());
   }
 
   @Override

@@ -14,13 +14,17 @@
 package com.github.ambry.protocol;
 
 import com.github.ambry.clustermap.ClusterMap;
+import com.github.ambry.clustermap.PartitionId;
+import com.github.ambry.commons.BlobId;
 import com.github.ambry.messageformat.MessageFormatFlags;
+import com.github.ambry.store.StoreKey;
 import com.github.ambry.utils.Utils;
+import com.google.protobuf.ByteString;
+import com.google.protobuf.CodedOutputStream;
 import io.netty.buffer.ByteBuf;
+import io.netty.buffer.PooledByteBufAllocator;
 import java.io.DataInputStream;
 import java.io.IOException;
-import java.nio.ByteBuffer;
-import java.nio.channels.WritableByteChannel;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -105,6 +109,61 @@ public class GetRequest extends RequestOrResponse {
     // header + message format size + partition request info size + total partition request info list size
     return super.sizeInBytes() + MessageFormat_Size_In_Bytes + Partition_Request_Info_List_Size
         + totalPartitionRequestInfoListSize + GetOption_Size_In_Bytes;
+  }
+
+  @Override
+  public ByteBuf toProtobuf() {
+    RequestOrResponseProto base = RequestOrResponseProto.newBuilder()
+        .setType(RequestOrResponseProto.RequestOrResponseType.GetRequest)
+        .setCorrelationId(correlationId)
+        .setVersionId(versionId)
+        .setClientId(clientId)
+        .build();
+    GetRequestProto.Builder requestBuilder = GetRequestProto.newBuilder()
+        .setRequest(base)
+        .setMessageFormatFlags(flags.ordinal())
+        .setGetOption(getOption.ordinal());
+    for (PartitionRequestInfo partitionRequestInfo : partitionRequestInfoList) {
+      PartitionRequestInfoProto.Builder infoBuilder = PartitionRequestInfoProto.newBuilder();
+      for (StoreKey blobId : partitionRequestInfo.getBlobIds()) {
+        infoBuilder.addBlobIds(ByteString.copyFrom(blobId.toBytes()));
+      }
+      requestBuilder.addPartitionRequestInfoList(infoBuilder.build());
+    }
+    GetRequestProto request = requestBuilder.build();
+    int size = request.getSerializedSize();
+    ByteBuf byteBuf = PooledByteBufAllocator.DEFAULT.ioBuffer(size);
+    try {
+      int writerIndex = byteBuf.writerIndex();
+      request.writeTo(CodedOutputStream.newInstance(byteBuf.nioBuffer()));
+      byteBuf.writerIndex(writerIndex + size);
+    } catch (IOException e) {
+
+    }
+    return byteBuf;
+  }
+
+  public static GetRequest readProtobufFrom(ByteBuf byteBuf, ClusterMap clusterMap) throws IOException {
+    GetRequestProto request = GetRequestProto.parseFrom(byteBuf.nioBuffer());
+    byteBuf.skipBytes(request.getSerializedSize());
+    RequestOrResponseProto base = request.getRequest();
+    List<PartitionRequestInfoProto> infoList = request.getPartitionRequestInfoListList();
+    ArrayList<PartitionRequestInfo> partitionRequestInfoList = new ArrayList<PartitionRequestInfo>(infoList.size());
+    for (PartitionRequestInfoProto info : infoList) {
+      List<ByteString> blobIdsList = info.getBlobIdsList();
+      List<BlobId> blobIds = new ArrayList<>(blobIdsList.size());
+      for (ByteString bs : blobIdsList) {
+        blobIds.add(new BlobId(bs.toString(), clusterMap));
+      }
+      PartitionId partitionId = null;
+      if (blobIds.size() > 0) {
+        partitionId = blobIds.get(0).getPartition();
+      }
+      partitionRequestInfoList.add(new PartitionRequestInfo(partitionId, blobIds));
+    }
+    return new GetRequest(base.getCorrelationId(), base.getClientId(),
+        MessageFormatFlags.values()[request.getMessageFormatFlags()], partitionRequestInfoList,
+        GetOption.values()[request.getGetOption()]);
   }
 
   @Override

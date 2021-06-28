@@ -14,23 +14,31 @@
 package com.github.ambry.protocol;
 
 import com.github.ambry.clustermap.ClusterMap;
+import com.github.ambry.clustermap.PartitionId;
+import com.github.ambry.commons.BlobId;
+import com.github.ambry.commons.Callback;
+import com.github.ambry.messageformat.MessageMetadata;
 import com.github.ambry.network.Send;
 import com.github.ambry.router.AsyncWritableChannel;
-import com.github.ambry.commons.Callback;
 import com.github.ambry.server.ServerErrorCode;
+import com.github.ambry.store.MessageInfo;
+import com.github.ambry.utils.NettyByteBufDataInputStream;
 import com.github.ambry.utils.Utils;
+import com.google.protobuf.ByteString;
+import com.google.protobuf.CodedOutputStream;
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.CompositeByteBuf;
 import io.netty.buffer.PooledByteBufAllocator;
 import io.netty.util.ReferenceCountUtil;
+import java.io.ByteArrayInputStream;
 import java.io.DataInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.ByteBuffer;
 import java.nio.channels.WritableByteChannel;
 import java.util.ArrayList;
-import java.util.Iterator;
 import java.util.List;
+import java.util.stream.Collectors;
 
 
 /**
@@ -221,6 +229,109 @@ public class GetResponse extends Response {
   public long sizeInBytes() {
     return super.sizeInBytes() + (Partition_Response_Info_List_Size + partitionResponseInfoSize) + ((toSend == null)
         ? sendSizeInBufferToSend : toSend.sizeInBytes());
+  }
+
+  @Override
+  public ByteBuf toProtobuf() {
+    RequestOrResponseProto base = RequestOrResponseProto.newBuilder()
+        .setType(RequestOrResponseProto.RequestOrResponseType.GetResponse)
+        .setCorrelationId(correlationId)
+        .setVersionId(versionId)
+        .setClientId(clientId)
+        .build();
+    GetResponseProto.Builder responseBuilder =
+        GetResponseProto.newBuilder().setResponse(base).setError(getError().ordinal());
+    for (PartitionResponseInfo responseInfo : partitionResponseInfoList) {
+      PartitionResponseInfoProto.Builder infoBuilder = PartitionResponseInfoProto.newBuilder();
+      infoBuilder.setPartitionId(ByteString.copyFrom(responseInfo.getPartition().getBytes()))
+          .setError(responseInfo.getErrorCode().ordinal());
+      for (MessageInfo messageInfo : responseInfo.getMessageInfoList()) {
+        infoBuilder.addMessageInfoList(MessageInfoProto.newBuilder()
+            .setStoreKey(ByteString.copyFrom(messageInfo.getStoreKey().toBytes()))
+            .setSize(messageInfo.getSize())
+            .setExpirationTimeInMs(messageInfo.getExpirationTimeInMs())
+            .setIsDeleted(messageInfo.isDeleted())
+            .setIsTtlUpdated(messageInfo.isTtlUpdated())
+            .setIsUndeleted(messageInfo.isUndeleted())
+            .setCrc(messageInfo.getCrc())
+            .setAccountId(messageInfo.getAccountId())
+            .setContainerId(messageInfo.getContainerId())
+            .setLifeVersion(messageInfo.getLifeVersion())
+            .build());
+      }
+      for (MessageMetadata mm : responseInfo.getMessageMetadataList()) {
+        infoBuilder.addEncryptionKeys(ByteString.copyFrom(mm.getEncryptionKey()));
+      }
+      responseBuilder.addPartitionResponseInfoList(infoBuilder.build());
+    }
+    GetResponseProto response = responseBuilder.build();
+    int size = response.getSerializedSize();
+    ByteBuf byteBuf = PooledByteBufAllocator.DEFAULT.ioBuffer(size);
+    try {
+      int writerIndex = byteBuf.writerIndex();
+      response.writeTo(CodedOutputStream.newInstance(byteBuf.nioBuffer()));
+      byteBuf.writerIndex(writerIndex + size);
+    } catch (IOException e) {
+
+    }
+    if (toSend != null) {
+      ByteBuf toSendContent = toSend.content();
+      if (toSendContent != null) {
+        // Since this composite blob will be a readonly blob, we don't really care about if it's allocated
+        // on a direct memory or not.
+        CompositeByteBuf compositeByteBuf = byteBuf.alloc().compositeDirectBuffer();
+        int maxNumComponent = 1 + toSendContent.nioBufferCount();
+        compositeByteBuf.addComponent(true, bufferToSend);
+        compositeByteBuf.addComponent(true, toSendContent);
+        byteBuf = compositeByteBuf;
+      }
+    }
+    return byteBuf;
+  }
+
+  public static GetResponse readProtobufFrom(ByteBuf byteBuf, ClusterMap clusterMap) throws IOException {
+    GetResponseProto response = GetResponseProto.parseFrom(byteBuf.nioBuffer());
+    byteBuf.skipBytes(response.getSerializedSize());
+    RequestOrResponseProto base = response.getResponse();
+    ServerErrorCode errorCode = ServerErrorCode.values()[response.getError()];
+    if (errorCode != ServerErrorCode.No_Error) {
+      return new GetResponse(base.getCorrelationId(), base.getClientId(), errorCode);
+    } else {
+      int partitionResponseInfoCount = response.getPartitionResponseInfoListCount();
+      ArrayList<PartitionResponseInfo> partitionResponseInfoList =
+          new ArrayList<PartitionResponseInfo>(partitionResponseInfoCount);
+      for (PartitionResponseInfoProto info : response.getPartitionResponseInfoListList()) {
+        List<MessageMetadata> messageMetadataList = info.getEncryptionKeysList()
+            .stream()
+            .map(bs -> new MessageMetadata(ByteBuffer.wrap(bs.toByteArray())))
+            .collect(Collectors.toList());
+        List<MessageInfo> messageInfoList = new ArrayList<>(info.getMessageInfoListCount());
+        for (MessageInfoProto mp : info.getMessageInfoListList()) {
+          BlobId blobId = new BlobId(mp.getStoreKey().toString(), clusterMap);
+          messageInfoList.add(
+              new MessageInfo.Builder(blobId, mp.getSize(), (short) mp.getAccountId(), (short) mp.getContainerId(),
+                  mp.getOperationTimeMs()).isDeleted(mp.getIsDeleted())
+                  .isTtlUpdated(mp.getIsTtlUpdated())
+                  .isUndeleted(mp.getIsUndeleted())
+                  .crc(mp.getCrc())
+                  .lifeVersion((short) mp.getLifeVersion())
+                  .build());
+        }
+        errorCode = ServerErrorCode.values()[info.getError()];
+        PartitionResponseInfo partitionResponseInfo = null;
+        PartitionId partitionId =
+            clusterMap.getPartitionIdFromStream(new ByteArrayInputStream(info.getPartitionId().toByteArray()));
+        if (errorCode == ServerErrorCode.No_Error) {
+          partitionResponseInfo = new PartitionResponseInfo(partitionId, messageInfoList, messageMetadataList);
+        } else {
+          partitionResponseInfo = new PartitionResponseInfo(partitionId, errorCode);
+        }
+        partitionResponseInfoList.add(partitionResponseInfo);
+      }
+      byteBuf.skipBytes(response.getSerializedSize());
+      return new GetResponse(base.getCorrelationId(), base.getClientId(), partitionResponseInfoList,
+          new NettyByteBufDataInputStream(byteBuf), errorCode);
+    }
   }
 
   @Override

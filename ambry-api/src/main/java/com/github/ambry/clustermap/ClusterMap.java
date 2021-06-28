@@ -14,6 +14,7 @@
 package com.github.ambry.clustermap;
 
 import com.codahale.metrics.MetricRegistry;
+import com.github.ambry.replication.FindTokenHelper;
 import java.io.IOException;
 import java.io.InputStream;
 import java.util.List;
@@ -155,4 +156,8 @@ public interface ClusterMap extends AutoCloseable {
    */
   @Override
   void close();
+
+  void setFindTokenHelper(FindTokenHelper helper);
+
+  FindTokenHelper getFindTokenHelper();
 }

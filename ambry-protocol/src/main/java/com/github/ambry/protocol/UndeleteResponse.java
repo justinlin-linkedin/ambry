@@ -13,8 +13,12 @@
  */
 package com.github.ambry.protocol;
 
+import com.github.ambry.clustermap.ClusterMap;
 import com.github.ambry.server.ServerErrorCode;
 import com.github.ambry.utils.Utils;
+import com.google.protobuf.CodedOutputStream;
+import io.netty.buffer.ByteBuf;
+import io.netty.buffer.PooledByteBufAllocator;
 import java.io.DataInputStream;
 import java.io.IOException;
 
@@ -95,6 +99,39 @@ public class UndeleteResponse extends Response {
   @Override
   public long sizeInBytes() {
     return super.sizeInBytes() + (long) Life_Version_InBytes;
+  }
+
+  @Override
+  public ByteBuf toProtobuf() {
+    RequestOrResponseProto base = RequestOrResponseProto.newBuilder()
+        .setType(RequestOrResponseProto.RequestOrResponseType.UndeleteResponse)
+        .setCorrelationId(correlationId)
+        .setVersionId(versionId)
+        .setClientId(clientId)
+        .build();
+    UndeleteResponseProto response = UndeleteResponseProto.newBuilder()
+        .setResponse(base)
+        .setError(getError().ordinal())
+        .setLiftVersion(lifeVersion)
+        .build();
+    int size = response.getSerializedSize();
+    ByteBuf byteBuf = PooledByteBufAllocator.DEFAULT.ioBuffer(size);
+    try {
+      int writerIndex = byteBuf.writerIndex();
+      response.writeTo(CodedOutputStream.newInstance(byteBuf.nioBuffer()));
+      byteBuf.writerIndex(writerIndex + size);
+    } catch (IOException e) {
+
+    }
+    return byteBuf;
+  }
+
+  public static UndeleteResponse readProtobufFrom(ByteBuf byteBuf, ClusterMap clusterMap) throws IOException {
+    UndeleteResponseProto response = UndeleteResponseProto.parseFrom(byteBuf.nioBuffer());
+    byteBuf.skipBytes(response.getSerializedSize());
+    RequestOrResponseProto base = response.getResponse();
+    return new UndeleteResponse(base.getCorrelationId(), base.getClientId(), (short) response.getLiftVersion(),
+        ServerErrorCode.values()[response.getError()]);
   }
 
   @Override

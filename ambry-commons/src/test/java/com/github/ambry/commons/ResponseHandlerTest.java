@@ -24,6 +24,7 @@ import com.github.ambry.clustermap.ReplicaId;
 import com.github.ambry.clustermap.ReplicaType;
 import com.github.ambry.network.ConnectionPoolTimeoutException;
 import com.github.ambry.network.NetworkClientErrorCode;
+import com.github.ambry.replication.FindTokenHelper;
 import com.github.ambry.router.RouterErrorCode;
 import com.github.ambry.router.RouterException;
 import com.github.ambry.server.ServerErrorCode;
@@ -147,6 +148,18 @@ public class ResponseHandlerTest {
     public Set<ReplicaEventType> getLastReplicaEvents() {
       return lastReplicaEvents;
     }
+    private FindTokenHelper findTokenHelper;
+
+    @Override
+    public void setFindTokenHelper(FindTokenHelper helper) {
+      this.findTokenHelper = helper;
+    }
+
+    @Override
+    public FindTokenHelper getFindTokenHelper() {
+      return findTokenHelper;
+    }
+
   }
 
   @Test

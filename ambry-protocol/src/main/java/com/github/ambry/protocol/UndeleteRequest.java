@@ -16,10 +16,12 @@ package com.github.ambry.protocol;
 import com.github.ambry.clustermap.ClusterMap;
 import com.github.ambry.commons.BlobId;
 import com.github.ambry.utils.Utils;
+import com.google.protobuf.ByteString;
+import com.google.protobuf.CodedOutputStream;
+import io.netty.buffer.ByteBuf;
+import io.netty.buffer.PooledByteBufAllocator;
 import java.io.DataInputStream;
 import java.io.IOException;
-import java.nio.ByteBuffer;
-import java.nio.channels.WritableByteChannel;
 
 
 /**
@@ -112,6 +114,40 @@ public class UndeleteRequest extends RequestOrResponse {
    */
   public long getOperationTimeMs() {
     return operationTimeMs;
+  }
+
+  @Override
+  public ByteBuf toProtobuf() {
+    RequestOrResponseProto base = RequestOrResponseProto.newBuilder()
+        .setType(RequestOrResponseProto.RequestOrResponseType.UndeleteRequest)
+        .setCorrelationId(correlationId)
+        .setVersionId(versionId)
+        .setClientId(clientId)
+        .build();
+    UndeleteRequestProto request = UndeleteRequestProto.newBuilder()
+        .setRequest(base)
+        .setBlobId(ByteString.copyFrom(blobId.toBytes()))
+        .setOperationTimeMs(operationTimeMs)
+        .build();
+    int size = request.getSerializedSize();
+    ByteBuf byteBuf = PooledByteBufAllocator.DEFAULT.ioBuffer(size);
+    try {
+      int writerIndex = byteBuf.writerIndex();
+      request.writeTo(CodedOutputStream.newInstance(byteBuf.nioBuffer()));
+      byteBuf.writerIndex(writerIndex + size);
+    } catch (IOException e) {
+
+    }
+    return byteBuf;
+  }
+
+  public static UndeleteRequest readProtobufFrom(ByteBuf byteBuf, ClusterMap clusterMap) throws IOException {
+    UndeleteRequestProto request = UndeleteRequestProto.parseFrom(byteBuf.nioBuffer());
+    byteBuf.skipBytes(request.getSerializedSize());
+    RequestOrResponseProto base = request.getRequest();
+    return new UndeleteRequest(base.getCorrelationId(), base.getClientId(),
+        new BlobId(request.getBlobId().toString(), clusterMap), request.getOperationTimeMs(),
+        (short) base.getVersionId());
   }
 
   @Override

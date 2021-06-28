@@ -694,5 +694,17 @@ public class BlobIdTransformerTest {
 
     public void close() {
     }
+
+    private FindTokenHelper findTokenHelper;
+
+    @Override
+    public void setFindTokenHelper(FindTokenHelper helper) {
+      this.findTokenHelper = helper;
+    }
+
+    @Override
+    public FindTokenHelper getFindTokenHelper() {
+      return findTokenHelper;
+    }
   }
 }

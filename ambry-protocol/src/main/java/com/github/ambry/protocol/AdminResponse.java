@@ -13,8 +13,12 @@
  */
 package com.github.ambry.protocol;
 
+import com.github.ambry.clustermap.ClusterMap;
 import com.github.ambry.server.ServerErrorCode;
 import com.github.ambry.utils.Utils;
+import com.google.protobuf.CodedOutputStream;
+import io.netty.buffer.ByteBuf;
+import io.netty.buffer.PooledByteBufAllocator;
 import java.io.DataInputStream;
 import java.io.IOException;
 
@@ -55,6 +59,37 @@ public class AdminResponse extends Response {
     ServerErrorCode error = ServerErrorCode.values()[stream.readShort()];
     // ignore version for now
     return new AdminResponse(correlationId, clientId, error);
+  }
+
+  @Override
+  public ByteBuf toProtobuf() {
+    RequestOrResponseProto base = RequestOrResponseProto.newBuilder()
+        .setType(RequestOrResponseProto.RequestOrResponseType.AdminResponse)
+        .setCorrelationId(correlationId)
+        .setVersionId(versionId)
+        .setClientId(clientId)
+        .build();
+    AdminResponseProto response =
+        AdminResponseProto.newBuilder().setResponse(base).setError(getError().ordinal()).build();
+    int size = response.getSerializedSize();
+
+    ByteBuf byteBuf = PooledByteBufAllocator.DEFAULT.ioBuffer(size);
+    try {
+      int writerIndex = byteBuf.writerIndex();
+      response.writeTo(CodedOutputStream.newInstance(byteBuf.nioBuffer()));
+      byteBuf.writerIndex(writerIndex + size);
+    } catch (IOException e) {
+
+    }
+    return byteBuf;
+  }
+
+  public static AdminResponse readProtobufFrom(ByteBuf byteBuf, ClusterMap clusterMap) throws IOException {
+    AdminResponseProto response = AdminResponseProto.parseFrom(byteBuf.nioBuffer());
+    byteBuf.skipBytes(response.getSerializedSize());
+    RequestOrResponseProto base = response.getResponse();
+    return new AdminResponse(base.getCorrelationId(), base.getClientId(),
+        ServerErrorCode.values()[response.getError()]);
   }
 
   @Override

@@ -1,0 +1,213 @@
+/**
+ * Copyright 2021 LinkedIn Corp. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ */
+
+syntax = "proto3";
+
+package protocol;
+
+option java_multiple_files = true;
+option java_package = "com.github.ambry.protocol";
+
+message RequestOrResponseProto {
+  enum RequestOrResponseType {
+    PutRequest = 0;
+    PutResponse = 1;
+    GetRequest = 2;
+    GetResponse = 3;
+    DeleteRequest = 4;
+    DeleteResponse = 5;
+    TtlUpdateRequest = 6;
+    TtlUpdateResponse = 7;
+    ReplicaMetadataRequest = 8;
+    ReplicaMetadataResponse = 9;
+    AdminRequest = 10;
+    AdminResponse = 11;
+    UndeleteRequest = 12;
+    UndeleteResponse = 13;
+  }
+  RequestOrResponseType type = 1;
+  int32 correlation_id = 2;
+  int32 version_id = 3;
+  string client_id = 4;
+}
+
+message TtlUpdateRequestProto {
+  RequestOrResponseProto request = 1;
+  bytes blob_id = 2;
+  int64 expired_at_ms = 3;
+  int64 operation_time_in_ms = 4;
+}
+
+message TtlUpdateResponseProto {
+  RequestOrResponseProto response = 1;
+  int32 error = 2;
+}
+
+message UndeleteRequestProto {
+  RequestOrResponseProto request = 1;
+  bytes blob_id = 2;
+  int64 operation_time_ms = 3;
+}
+
+message UndeleteResponseProto {
+  RequestOrResponseProto response = 1;
+  int32 error = 2;
+  int32 lift_version = 3;
+}
+
+message DeleteRequestProto {
+  RequestOrResponseProto request = 1;
+  bytes blob_id = 2;
+  int64 deletion_time_in_ms = 3;
+}
+
+message DeleteResponseProto {
+  RequestOrResponseProto response = 1;
+  int32 error = 2;
+}
+
+message PartitionRequestInfoProto {
+  repeated bytes blob_ids = 1;
+}
+
+message GetRequestProto {
+  RequestOrResponseProto request = 1;
+  int32 message_format_flags = 2;
+  int32 get_option = 3;
+  repeated PartitionRequestInfoProto partition_request_info_list = 4;
+}
+
+message MessageInfoProto {
+  bytes store_key = 1;
+  int64 size = 2;
+  int64 expiration_time_in_ms = 3;
+  bool is_deleted = 4;
+  bool is_ttl_updated = 5;
+  bool is_undeleted = 6;
+  int64 crc = 7;
+  int32 account_id = 8;
+  int32 container_id = 9;
+  int64 operation_time_ms = 10;
+  int32 life_version = 11;
+}
+
+message PartitionResponseInfoProto {
+  bytes partition_id = 1;
+  repeated MessageInfoProto message_info_list = 2;
+  repeated bytes encryption_keys = 3;
+  int32 error = 4;
+}
+
+message GetResponseProto {
+  RequestOrResponseProto response = 1;
+  int32 error = 2;
+  repeated PartitionResponseInfoProto partition_response_info_list = 3;
+}
+
+message BlobPropertiesProto {
+  string service_id = 1;
+  string owner_id = 2;
+  string content_type = 3;
+  string content_encoding = 4;
+  string filename = 5;
+  bool is_private = 6;
+  int64 creation_time_in_ms = 7;
+  int32 account_id = 8;
+  int32 container_id = 9;
+  bool is_encrypted = 10;
+  int64 blob_size = 11;
+  int64 time_to_live_in_seconds = 12;
+  string external_asset_tag = 13;
+}
+
+message PutRequestProto {
+  RequestOrResponseProto request = 1;
+  bytes usermetadata = 2;
+  int64 blob_size = 3;
+  bytes blob_id = 4;
+  BlobPropertiesProto properties = 5;
+  int32 blob_type = 6;
+  bytes blob_encryption_key = 7;
+  int64 crc_value = 8;
+}
+
+message PutResponseProto {
+  RequestOrResponseProto response = 1;
+  int32 error = 2;
+}
+
+message ReplicaMetadataRequestInfoProto {
+  bytes token = 1;
+  string host_name = 2;
+  string replica_path = 3;
+  int32 replica_type = 4;
+  bytes partition_id = 5;
+}
+
+message ReplicaMetadataRequestProto {
+  RequestOrResponseProto request = 1;
+  repeated ReplicaMetadataRequestInfoProto replica_metadata_request_info_list = 2;
+  int64 max_total_size_of_entries_in_bytes = 3;
+}
+
+message ReplicaMetadataResponseInfoProto {
+  bytes token = 1;
+  repeated MessageInfoProto message_info_list = 2;
+  int64 remove_replica_lag_in_bytes = 4;
+  bytes partition_id = 5;
+  int32 replica_type = 6;
+  int32 error = 7;
+}
+
+message ReplicaMetadataResponseProto {
+  RequestOrResponseProto response = 1;
+  int32 error = 2;
+  repeated ReplicaMetadataResponseInfoProto replica_metadata_response_info_list = 3;
+}
+
+message AdminRequestProto {
+  RequestOrResponseProto request = 1;
+  int32 type = 2;
+  bytes partition_id = 3;
+}
+
+message BlobStoreControlAdminRequestProto {
+  int32 num_replicas_caught_up_per_partition = 1;
+  int32 store_control_action = 2;
+}
+
+message CatchupStatusAdminRequestProto {
+  int64 acceptable_lag_in_bytes = 1;
+  int32 num_replicas_caught_up_per_partition = 2;
+}
+
+message ReplicationControlAdminRequestProto {
+  repeated string origins = 1;
+  bool enable = 2;
+}
+
+message RequestControlAdminRequestProto {
+  RequestOrResponseProto.RequestOrResponseType request_type_to_control = 1;
+  bool enable = 2;
+}
+
+message AdminResponseProto {
+  RequestOrResponseProto response = 1;
+  int32 error = 2;
+}
+
+message CatchupStatusAdminResponseProto {
+  AdminResponseProto admin = 1;
+  bool is_caught_up = 2;
+}

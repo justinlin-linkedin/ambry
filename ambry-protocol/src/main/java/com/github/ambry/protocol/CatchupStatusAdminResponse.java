@@ -13,6 +13,11 @@
  */
 package com.github.ambry.protocol;
 
+import com.github.ambry.clustermap.ClusterMap;
+import com.github.ambry.server.ServerErrorCode;
+import com.google.protobuf.CodedOutputStream;
+import io.netty.buffer.ByteBuf;
+import io.netty.buffer.PooledByteBufAllocator;
 import java.io.DataInputStream;
 import java.io.IOException;
 
@@ -63,6 +68,39 @@ public class CatchupStatusAdminResponse extends AdminResponse {
   @Override
   public long sizeInBytes() {
     return sizeInBytes;
+  }
+
+  @Override
+  public ByteBuf toProtobuf() {
+    RequestOrResponseProto base = RequestOrResponseProto.newBuilder()
+        .setType(RequestOrResponseProto.RequestOrResponseType.AdminResponse)
+        .setCorrelationId(correlationId)
+        .setVersionId(versionId)
+        .setClientId(clientId)
+        .build();
+    AdminResponseProto admin = AdminResponseProto.newBuilder().setResponse(base).setError(getError().ordinal()).build();
+    CatchupStatusAdminResponseProto response =
+        CatchupStatusAdminResponseProto.newBuilder().setAdmin(admin).setIsCaughtUp(isCaughtUp).build();
+    int size = response.getSerializedSize();
+
+    ByteBuf byteBuf = PooledByteBufAllocator.DEFAULT.ioBuffer(size);
+    try {
+      int writerIndex = byteBuf.writerIndex();
+      response.writeTo(CodedOutputStream.newInstance(byteBuf.nioBuffer()));
+      byteBuf.writerIndex(writerIndex + size);
+    } catch (IOException e) {
+
+    }
+    return byteBuf;
+  }
+
+  public static CatchupStatusAdminResponse readProtobufFrom(ByteBuf byteBuf, ClusterMap clusterMap) throws IOException {
+    CatchupStatusAdminResponseProto response = CatchupStatusAdminResponseProto.parseFrom(byteBuf.nioBuffer());
+    byteBuf.skipBytes(response.getSerializedSize());
+    AdminResponseProto admin = response.getAdmin();
+    RequestOrResponseProto base = admin.getResponse();
+    return new CatchupStatusAdminResponse(response.getIsCaughtUp(),
+        new AdminResponse(base.getCorrelationId(), base.getClientId(), ServerErrorCode.values()[admin.getError()]));
   }
 
   @Override

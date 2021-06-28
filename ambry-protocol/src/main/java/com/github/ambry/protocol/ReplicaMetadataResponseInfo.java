@@ -16,6 +16,7 @@ package com.github.ambry.protocol;
 import com.github.ambry.clustermap.ClusterMap;
 import com.github.ambry.clustermap.PartitionId;
 import com.github.ambry.clustermap.ReplicaType;
+import com.github.ambry.messageformat.MessageMetadata;
 import com.github.ambry.replication.FindToken;
 import com.github.ambry.replication.FindTokenFactory;
 import com.github.ambry.replication.FindTokenHelper;
@@ -24,7 +25,6 @@ import com.github.ambry.store.MessageInfo;
 import io.netty.buffer.ByteBuf;
 import java.io.DataInputStream;
 import java.io.IOException;
-import java.nio.ByteBuffer;
 import java.util.List;
 
 
@@ -89,6 +89,10 @@ public class ReplicaMetadataResponseInfo {
     return messageInfoAndMetadataListSerde.getMessageInfoList();
   }
 
+  public List<MessageMetadata> getMessageMetadataList() {
+    return messageInfoAndMetadataListSerde.getMessageMetadataList();
+  }
+
   public FindToken getFindToken() {
     return token;
   }
@@ -99,6 +103,10 @@ public class ReplicaMetadataResponseInfo {
 
   public ServerErrorCode getError() {
     return errorCode;
+  }
+
+  public ReplicaType getReplicaType() {
+    return replicaType;
   }
 
   public static ReplicaMetadataResponseInfo readFrom(DataInputStream stream, FindTokenHelper helper,

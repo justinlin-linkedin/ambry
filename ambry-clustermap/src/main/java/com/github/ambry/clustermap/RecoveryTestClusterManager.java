@@ -14,6 +14,7 @@
 package com.github.ambry.clustermap;
 
 import com.codahale.metrics.MetricRegistry;
+import com.github.ambry.replication.FindTokenHelper;
 import java.io.IOException;
 import java.io.InputStream;
 import java.util.ArrayList;
@@ -22,8 +23,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import org.json.JSONObject;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 
 /**
@@ -213,5 +212,17 @@ public class RecoveryTestClusterManager implements ClusterMap {
     if (helixClusterManager != null) {
       helixClusterManager.close();
     }
+  }
+
+  private FindTokenHelper findTokenHelper;
+
+  @Override
+  public void setFindTokenHelper(FindTokenHelper helper) {
+    this.findTokenHelper = helper;
+  }
+
+  @Override
+  public FindTokenHelper getFindTokenHelper() {
+    return findTokenHelper;
   }
 }

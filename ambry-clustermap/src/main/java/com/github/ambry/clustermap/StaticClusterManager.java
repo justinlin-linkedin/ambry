@@ -14,6 +14,7 @@
 package com.github.ambry.clustermap;
 
 import com.codahale.metrics.MetricRegistry;
+import com.github.ambry.replication.FindTokenHelper;
 import com.github.ambry.utils.SystemTime;
 import java.io.IOException;
 import java.io.InputStream;
@@ -557,5 +558,17 @@ class StaticClusterManager implements ClusterMap {
   @Override
   public void close() {
     // No-op.
+  }
+
+  private FindTokenHelper findTokenHelper;
+
+  @Override
+  public void setFindTokenHelper(FindTokenHelper helper) {
+    this.findTokenHelper = helper;
+  }
+
+  @Override
+  public FindTokenHelper getFindTokenHelper() {
+    return findTokenHelper;
   }
 }

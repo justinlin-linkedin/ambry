@@ -25,6 +25,7 @@ import com.github.ambry.clustermap.ReplicaEventType;
 import com.github.ambry.clustermap.ReplicaId;
 import com.github.ambry.network.Port;
 import com.github.ambry.network.PortType;
+import com.github.ambry.replication.FindTokenHelper;
 import com.github.ambry.rest.MockRestRequest;
 import com.github.ambry.rest.MockRestResponseChannel;
 import com.github.ambry.rest.RestMethod;
@@ -403,5 +404,17 @@ class TailoredPeersClusterMap implements ClusterMap {
 
   Set<String> getPeers(String datanode) {
     return peerMap.get(datanode);
+  }
+
+  private FindTokenHelper findTokenHelper;
+
+  @Override
+  public void setFindTokenHelper(FindTokenHelper helper) {
+    this.findTokenHelper = helper;
+  }
+
+  @Override
+  public FindTokenHelper getFindTokenHelper() {
+    return findTokenHelper;
   }
 }

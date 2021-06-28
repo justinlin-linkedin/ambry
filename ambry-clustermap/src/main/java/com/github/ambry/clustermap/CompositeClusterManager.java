@@ -14,6 +14,7 @@
 package com.github.ambry.clustermap;
 
 import com.codahale.metrics.MetricRegistry;
+import com.github.ambry.replication.FindTokenHelper;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.FilterInputStream;
@@ -311,6 +312,18 @@ class CompositeClusterManager implements ClusterMap {
     if (helixClusterManager != null) {
       helixClusterManager.close();
     }
+  }
+
+  private FindTokenHelper findTokenHelper;
+
+  @Override
+  public void setFindTokenHelper(FindTokenHelper helper) {
+    this.findTokenHelper = helper;
+  }
+
+  @Override
+  public FindTokenHelper getFindTokenHelper() {
+    return findTokenHelper;
   }
 
   /**

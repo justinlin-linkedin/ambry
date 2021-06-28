@@ -13,9 +13,9 @@
  */
 package com.github.ambry.protocol;
 
+import com.github.ambry.commons.Callback;
 import com.github.ambry.network.SendWithCorrelationId;
 import com.github.ambry.router.AsyncWritableChannel;
-import com.github.ambry.commons.Callback;
 import com.github.ambry.utils.AbstractByteBufHolder;
 import com.github.ambry.utils.Utils;
 import io.netty.buffer.ByteBuf;
@@ -143,6 +143,10 @@ public abstract class RequestOrResponse extends AbstractByteBufHolder<RequestOrR
       return buf.release();
     }
     return false;
+  }
+
+  public ByteBuf toProtobuf() {
+    return null;
   }
 }
 

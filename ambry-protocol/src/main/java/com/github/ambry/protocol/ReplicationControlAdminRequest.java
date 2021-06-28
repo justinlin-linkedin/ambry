@@ -14,6 +14,10 @@
 package com.github.ambry.protocol;
 
 import com.github.ambry.utils.Utils;
+import com.google.protobuf.ByteString;
+import com.google.protobuf.CodedOutputStream;
+import io.netty.buffer.ByteBuf;
+import io.netty.buffer.PooledByteBufAllocator;
 import java.io.DataInputStream;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
@@ -87,6 +91,45 @@ public class ReplicationControlAdminRequest extends AdminRequest {
   @Override
   public long sizeInBytes() {
     return sizeInBytes;
+  }
+
+  @Override
+  public ByteBuf toProtobuf() {
+    RequestOrResponseProto base = RequestOrResponseProto.newBuilder()
+        .setType(RequestOrResponseProto.RequestOrResponseType.AdminRequest)
+        .setCorrelationId(correlationId)
+        .setVersionId(versionId)
+        .setClientId(clientId)
+        .build();
+    AdminRequestProto.Builder adminBaseBuilder =
+        AdminRequestProto.newBuilder().setRequest(base).setType(AdminRequestOrResponseType.ReplicationControl.ordinal());
+    if (getPartitionId() != null) {
+      adminBaseBuilder.setPartitionId(ByteString.copyFrom(getPartitionId().getBytes()));
+    }
+    AdminRequestProto adminBase = adminBaseBuilder.build();
+    ReplicationControlAdminRequestProto request =
+        ReplicationControlAdminRequestProto.newBuilder().setEnable(enable).addAllOrigins(origins).build();
+    int size = adminBase.getSerializedSize() + request.getSerializedSize();
+    ByteBuf byteBuf = PooledByteBufAllocator.DEFAULT.ioBuffer(size);
+    try {
+      int writerIndex = byteBuf.writerIndex();
+      adminBase.writeTo(CodedOutputStream.newInstance(byteBuf.nioBuffer()));
+      byteBuf.writerIndex(writerIndex + adminBase.getSerializedSize());
+      request.writeTo(CodedOutputStream.newInstance(byteBuf.nioBuffer()));
+      byteBuf.writerIndex(writerIndex + request.getSerializedSize());
+    } catch (IOException e) {
+
+    }
+    return byteBuf;
+  }
+
+  public static ReplicationControlAdminRequest readProtobufFrom(ByteBuf byteBuf, AdminRequest adminRequest)
+      throws IOException {
+    ReplicationControlAdminRequestProto request = ReplicationControlAdminRequestProto.parseFrom(byteBuf.nioBuffer());
+    byteBuf.skipBytes(request.getSerializedSize());
+
+    return new ReplicationControlAdminRequest(request.getOriginsList().subList(0, request.getOriginsCount()),
+        request.getEnable(), adminRequest);
   }
 
   @Override

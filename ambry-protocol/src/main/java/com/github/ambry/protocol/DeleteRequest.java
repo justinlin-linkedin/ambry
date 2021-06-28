@@ -16,10 +16,12 @@ package com.github.ambry.protocol;
 import com.github.ambry.clustermap.ClusterMap;
 import com.github.ambry.commons.BlobId;
 import com.github.ambry.utils.Utils;
+import com.google.protobuf.ByteString;
+import com.google.protobuf.CodedOutputStream;
+import io.netty.buffer.ByteBuf;
+import io.netty.buffer.PooledByteBufAllocator;
 import java.io.DataInputStream;
 import java.io.IOException;
-import java.nio.ByteBuffer;
-import java.nio.channels.WritableByteChannel;
 
 
 /**
@@ -104,6 +106,39 @@ public class DeleteRequest extends RequestOrResponse {
       sizeInBytes += DELETION_TIME_FIELD_SIZE_IN_BYTES;
     }
     return sizeInBytes;
+  }
+
+  @Override
+  public ByteBuf toProtobuf() {
+    RequestOrResponseProto base = RequestOrResponseProto.newBuilder()
+        .setType(RequestOrResponseProto.RequestOrResponseType.DeleteRequest)
+        .setCorrelationId(correlationId)
+        .setVersionId(versionId)
+        .setClientId(clientId)
+        .build();
+    DeleteRequestProto request = DeleteRequestProto.newBuilder()
+        .setRequest(base)
+        .setBlobId(ByteString.copyFrom(blobId.toBytes()))
+        .setDeletionTimeInMs(deletionTimeInMs)
+        .build();
+    int size = request.getSerializedSize();
+    ByteBuf byteBuf = PooledByteBufAllocator.DEFAULT.ioBuffer(size);
+    try {
+      int writerIndex = byteBuf.writerIndex();
+      request.writeTo(CodedOutputStream.newInstance(byteBuf.nioBuffer()));
+      byteBuf.writerIndex(writerIndex + size);
+    } catch (IOException e) {
+
+    }
+    return byteBuf;
+  }
+
+  public static DeleteRequest readProtobufFrom(ByteBuf byteBuf, ClusterMap clusterMap) throws IOException {
+    DeleteRequestProto request = DeleteRequestProto.parseFrom(byteBuf.nioBuffer());
+    byteBuf.skipBytes(request.getSerializedSize());
+    RequestOrResponseProto base = request.getRequest();
+    return new DeleteRequest(base.getCorrelationId(), base.getClientId(),
+        new BlobId(request.getBlobId().toString(), clusterMap), request.getDeletionTimeInMs());
   }
 
   @Override

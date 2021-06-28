@@ -17,6 +17,7 @@ import com.codahale.metrics.MetricRegistry;
 import com.github.ambry.network.Port;
 import com.github.ambry.network.PortType;
 import com.github.ambry.utils.ByteBufferInputStream;
+import com.github.ambry.replication.FindTokenHelper;
 import com.github.ambry.utils.SystemTime;
 import java.io.DataInputStream;
 import java.io.File;
@@ -620,6 +621,18 @@ public class MockClusterMap implements ClusterMap {
   @Override
   public void close() {
     // No-op.
+  }
+
+  private FindTokenHelper findTokenHelper;
+
+  @Override
+  public void setFindTokenHelper(FindTokenHelper helper) {
+    this.findTokenHelper = helper;
+  }
+
+  @Override
+  public FindTokenHelper getFindTokenHelper() {
+    return findTokenHelper;
   }
 
   /**

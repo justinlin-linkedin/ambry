@@ -14,13 +14,22 @@
 package com.github.ambry.protocol;
 
 import com.github.ambry.clustermap.ClusterMap;
-import com.github.ambry.server.ServerErrorCode;
+import com.github.ambry.clustermap.PartitionId;
+import com.github.ambry.clustermap.ReplicaType;
+import com.github.ambry.commons.BlobId;
+import com.github.ambry.replication.FindToken;
+import com.github.ambry.replication.FindTokenFactory;
 import com.github.ambry.replication.FindTokenHelper;
+import com.github.ambry.server.ServerErrorCode;
+import com.github.ambry.store.MessageInfo;
 import com.github.ambry.utils.Utils;
+import com.google.protobuf.ByteString;
+import com.google.protobuf.CodedOutputStream;
+import io.netty.buffer.ByteBuf;
+import io.netty.buffer.PooledByteBufAllocator;
+import java.io.ByteArrayInputStream;
 import java.io.DataInputStream;
 import java.io.IOException;
-import java.nio.ByteBuffer;
-import java.nio.channels.WritableByteChannel;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -107,6 +116,92 @@ public class ReplicaMetadataResponse extends Response {
   public long sizeInBytes() {
     return super.sizeInBytes() + Replica_Metadata_Response_Info_List_Size_In_Bytes
         + replicaMetadataResponseInfoListSizeInBytes;
+  }
+
+  @Override
+  public ByteBuf toProtobuf() {
+    RequestOrResponseProto base = RequestOrResponseProto.newBuilder()
+        .setType(RequestOrResponseProto.RequestOrResponseType.ReplicaMetadataResponse)
+        .setCorrelationId(correlationId)
+        .setVersionId(versionId)
+        .setClientId(clientId)
+        .build();
+    ReplicaMetadataResponseProto.Builder responseBuilder =
+        ReplicaMetadataResponseProto.newBuilder().setResponse(base).setError(getError().ordinal());
+    for (ReplicaMetadataResponseInfo responseInfo : replicaMetadataResponseInfoList) {
+      ReplicaMetadataResponseInfoProto.Builder infoBuilder = ReplicaMetadataResponseInfoProto.newBuilder()
+          .setToken(ByteString.copyFrom(responseInfo.getFindToken().toBytes()))
+          .setRemoveReplicaLagInBytes(responseInfo.getRemoteReplicaLagInBytes())
+          .setPartitionId(ByteString.copyFrom(responseInfo.getPartitionId().getBytes()))
+          .setReplicaType(responseInfo.getReplicaType().ordinal())
+          .setError(responseInfo.getError().ordinal());
+      for (MessageInfo messageInfo : responseInfo.getMessageInfoList()) {
+        infoBuilder.addMessageInfoList(MessageInfoProto.newBuilder()
+            .setStoreKey(ByteString.copyFrom(messageInfo.getStoreKey().toBytes()))
+            .setSize(messageInfo.getSize())
+            .setExpirationTimeInMs(messageInfo.getExpirationTimeInMs())
+            .setIsDeleted(messageInfo.isDeleted())
+            .setIsTtlUpdated(messageInfo.isTtlUpdated())
+            .setIsUndeleted(messageInfo.isUndeleted())
+            .setCrc(messageInfo.getCrc())
+            .setAccountId(messageInfo.getAccountId())
+            .setContainerId(messageInfo.getContainerId())
+            .setLifeVersion(messageInfo.getLifeVersion())
+            .build());
+      }
+      responseBuilder.addReplicaMetadataResponseInfoList(infoBuilder.build());
+    }
+    ReplicaMetadataResponseProto response = responseBuilder.build();
+    int size = response.getSerializedSize();
+    ByteBuf byteBuf = PooledByteBufAllocator.DEFAULT.ioBuffer(size);
+    try {
+      int writerIndex = byteBuf.writerIndex();
+      response.writeTo(CodedOutputStream.newInstance(byteBuf.nioBuffer()));
+      byteBuf.writerIndex(writerIndex + size);
+    } catch (IOException e) {
+
+    }
+    return byteBuf;
+  }
+
+  public static ReplicaMetadataResponse readProtobufFrom(ByteBuf byteBuf, ClusterMap clusterMap) throws IOException {
+    ReplicaMetadataResponseProto response = ReplicaMetadataResponseProto.parseFrom(byteBuf.nioBuffer());
+    byteBuf.skipBytes(response.getSerializedSize());
+    RequestOrResponseProto base = response.getResponse();
+    List<ReplicaMetadataResponseInfo> responseInfoList =
+        new ArrayList<>(response.getReplicaMetadataResponseInfoListCount());
+    for (ReplicaMetadataResponseInfoProto infoProto : response.getReplicaMetadataResponseInfoListList()) {
+      PartitionId partitionId =
+          clusterMap.getPartitionIdFromStream(new ByteArrayInputStream(infoProto.getPartitionId().toByteArray()));
+      ReplicaType type = ReplicaType.values()[infoProto.getReplicaType()];
+      FindTokenFactory findTokenFactory = clusterMap.getFindTokenHelper().getFindTokenFactoryFromReplicaType(type);
+      FindToken token = findTokenFactory.getFindToken(
+          new DataInputStream(new ByteArrayInputStream(infoProto.getToken().toByteArray())));
+      List<MessageInfo> messageInfoList = new ArrayList<>(infoProto.getMessageInfoListCount());
+      for (MessageInfoProto mp : infoProto.getMessageInfoListList()) {
+        BlobId blobId = new BlobId(mp.getStoreKey().toString(), clusterMap);
+        messageInfoList.add(
+            new MessageInfo.Builder(blobId, mp.getSize(), (short) mp.getAccountId(), (short) mp.getContainerId(),
+                mp.getOperationTimeMs()).isDeleted(mp.getIsDeleted())
+                .isTtlUpdated(mp.getIsTtlUpdated())
+                .isUndeleted(mp.getIsUndeleted())
+                .crc(mp.getCrc())
+                .lifeVersion((short) mp.getLifeVersion())
+                .build());
+      }
+      ReplicaMetadataResponseInfo responseInfo =
+          new ReplicaMetadataResponseInfo(partitionId, type, token, messageInfoList,
+              infoProto.getRemoveReplicaLagInBytes(), (short) base.getVersionId());
+      responseInfoList.add(responseInfo);
+    }
+    ServerErrorCode error = ServerErrorCode.values()[response.getError()];
+    if (error == ServerErrorCode.No_Error) {
+      return new ReplicaMetadataResponse(base.getCorrelationId(), base.getClientId(), error,
+          (short) base.getVersionId());
+    } else {
+      return new ReplicaMetadataResponse(base.getCorrelationId(), base.getClientId(), error, responseInfoList,
+          (short) base.getVersionId());
+    }
   }
 
   @Override

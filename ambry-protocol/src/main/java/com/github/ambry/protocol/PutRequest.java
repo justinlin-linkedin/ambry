@@ -20,7 +20,10 @@ import com.github.ambry.messageformat.BlobPropertiesSerDe;
 import com.github.ambry.messageformat.BlobType;
 import com.github.ambry.utils.ByteBufferInputStream;
 import com.github.ambry.utils.CrcInputStream;
+import com.github.ambry.utils.NettyByteBufDataInputStream;
 import com.github.ambry.utils.Utils;
+import com.google.protobuf.ByteString;
+import com.google.protobuf.CodedOutputStream;
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.CompositeByteBuf;
 import io.netty.buffer.PooledByteBufAllocator;
@@ -297,6 +300,79 @@ public class PutRequest extends RequestOrResponse {
   @Override
   public boolean isSendComplete() {
     return sizeInBytes() == sentBytes;
+  }
+
+  @Override
+  public ByteBuf toProtobuf() {
+    RequestOrResponseProto base = RequestOrResponseProto.newBuilder()
+        .setType(RequestOrResponseProto.RequestOrResponseType.PutRequest)
+        .setCorrelationId(correlationId)
+        .setVersionId(versionId)
+        .setClientId(clientId)
+        .build();
+    PutRequestProto request = PutRequestProto.newBuilder()
+        .setRequest(base)
+        .setUsermetadata(ByteString.copyFrom(usermetadata))
+        .setBlobSize(blobSize)
+        .setBlobId(ByteString.copyFrom(blobId.toBytes()))
+        .setProperties(BlobPropertiesProto.newBuilder()
+            .setServiceId(properties.getServiceId())
+            .setOwnerId(properties.getOwnerId())
+            .setContentType(properties.getContentType())
+            .setContentEncoding(properties.getContentEncoding())
+            .setFilename(properties.getFilename())
+            .setIsPrivate(properties.isPrivate())
+            .setCreationTimeInMs(properties.getCreationTimeInMs())
+            .setAccountId(properties.getAccountId())
+            .setContainerId(properties.getContainerId())
+            .setIsEncrypted(properties.isEncrypted())
+            .setBlobSize(properties.getBlobSize())
+            .setTimeToLiveInSeconds(properties.getTimeToLiveInSeconds())
+            .setExternalAssetTag(properties.getExternalAssetTag())
+            .build())
+        .setBlobType(blobType.ordinal())
+        .setBlobEncryptionKey(ByteString.copyFrom(blobEncryptionKey))
+        .setCrcValue(crcValue)
+        .build();
+    int size = request.getSerializedSize();
+    ByteBuf byteBuf = PooledByteBufAllocator.DEFAULT.ioBuffer(size);
+    try {
+      int writerIndex = byteBuf.writerIndex();
+      request.writeTo(CodedOutputStream.newInstance(byteBuf.nioBuffer()));
+      byteBuf.writerIndex(writerIndex + size);
+    } catch (IOException e) {
+
+    }
+    // Now construct the real bufferToSend, which should be a composite ByteBuf.
+    CompositeByteBuf compositeByteBuf = byteBuf.alloc().compositeHeapBuffer(1 + blob.nioBufferCount());
+    compositeByteBuf.addComponent(true, byteBuf);
+    if (blob instanceof CompositeByteBuf) {
+      Iterator<ByteBuf> iter = ((CompositeByteBuf) blob).iterator();
+      while (iter.hasNext()) {
+        compositeByteBuf.addComponent(true, iter.next());
+      }
+    } else {
+      compositeByteBuf.addComponent(true, blob);
+    }
+    return compositeByteBuf;
+  }
+
+  public static PutRequest readProtobufFromt(ByteBuf byteBuf, ClusterMap clusterMap) throws IOException {
+    PutRequestProto request = PutRequestProto.parseFrom(byteBuf.nioBuffer());
+    byteBuf.skipBytes(request.getSerializedSize());
+    RequestOrResponseProto base = request.getRequest();
+    BlobPropertiesProto propertiesProto = request.getProperties();
+    BlobProperties properties =
+        new BlobProperties(propertiesProto.getBlobSize(), propertiesProto.getServiceId(), propertiesProto.getOwnerId(),
+            propertiesProto.getContentType(), propertiesProto.getIsPrivate(), propertiesProto.getTimeToLiveInSeconds(),
+            propertiesProto.getCreationTimeInMs(), (short) propertiesProto.getAccountId(),
+            (short) propertiesProto.getContainerId(), propertiesProto.getIsEncrypted(),
+            propertiesProto.getExternalAssetTag(), propertiesProto.getContentEncoding(), propertiesProto.getFilename());
+    return new PutRequest(base.getCorrelationId(), base.getClientId(),
+        new BlobId(request.getBlobId().toString(), clusterMap), properties,
+        ByteBuffer.wrap(request.getUsermetadata().toByteArray()), request.getBlobSize(),
+        BlobType.values()[request.getBlobType()], ByteBuffer.wrap(request.getBlobEncryptionKey().toByteArray()),
+        new NettyByteBufDataInputStream(byteBuf), request.getCrcValue());
   }
 
   @Override

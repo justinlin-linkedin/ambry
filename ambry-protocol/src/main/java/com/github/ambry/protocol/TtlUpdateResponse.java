@@ -13,8 +13,12 @@
  */
 package com.github.ambry.protocol;
 
+import com.github.ambry.clustermap.ClusterMap;
 import com.github.ambry.server.ServerErrorCode;
 import com.github.ambry.utils.Utils;
+import com.google.protobuf.CodedOutputStream;
+import io.netty.buffer.ByteBuf;
+import io.netty.buffer.PooledByteBufAllocator;
 import java.io.DataInputStream;
 import java.io.IOException;
 
@@ -53,6 +57,37 @@ public class TtlUpdateResponse extends Response {
     String clientId = Utils.readIntString(stream);
     ServerErrorCode error = ServerErrorCode.values()[stream.readShort()];
     return new TtlUpdateResponse(correlationId, clientId, error);
+  }
+
+  @Override
+  public ByteBuf toProtobuf() {
+    RequestOrResponseProto base = RequestOrResponseProto.newBuilder()
+        .setType(RequestOrResponseProto.RequestOrResponseType.TtlUpdateResponse)
+        .setCorrelationId(correlationId)
+        .setVersionId(versionId)
+        .setClientId(clientId)
+        .build();
+    TtlUpdateResponseProto response =
+        TtlUpdateResponseProto.newBuilder().setResponse(base).setError(getError().ordinal()).build();
+    int size = response.getSerializedSize();
+
+    ByteBuf byteBuf = PooledByteBufAllocator.DEFAULT.ioBuffer(size);
+    try {
+      int writerIndex = byteBuf.writerIndex();
+      response.writeTo(CodedOutputStream.newInstance(byteBuf.nioBuffer()));
+      byteBuf.writerIndex(writerIndex + size);
+    } catch (IOException e) {
+
+    }
+    return byteBuf;
+  }
+
+  public static TtlUpdateResponse readProtobufFrom(ByteBuf byteBuf, ClusterMap clusterMap) throws IOException {
+    TtlUpdateResponseProto response = TtlUpdateResponseProto.parseFrom(byteBuf.nioBuffer());
+    byteBuf.skipBytes(response.getSerializedSize());
+    RequestOrResponseProto base = response.getResponse();
+    return new TtlUpdateResponse(base.getCorrelationId(), base.getClientId(),
+        ServerErrorCode.values()[response.getError()]);
   }
 
   @Override

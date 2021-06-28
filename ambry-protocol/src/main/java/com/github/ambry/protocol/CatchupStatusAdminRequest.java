@@ -13,6 +13,10 @@
  */
 package com.github.ambry.protocol;
 
+import com.google.protobuf.ByteString;
+import com.google.protobuf.CodedOutputStream;
+import io.netty.buffer.ByteBuf;
+import io.netty.buffer.PooledByteBufAllocator;
 import java.io.DataInputStream;
 import java.io.IOException;
 
@@ -89,6 +93,47 @@ public class CatchupStatusAdminRequest extends AdminRequest {
   @Override
   public long sizeInBytes() {
     return sizeInBytes;
+  }
+
+  @Override
+  public ByteBuf toProtobuf() {
+    RequestOrResponseProto base = RequestOrResponseProto.newBuilder()
+        .setType(RequestOrResponseProto.RequestOrResponseType.AdminRequest)
+        .setCorrelationId(correlationId)
+        .setVersionId(versionId)
+        .setClientId(clientId)
+        .build();
+    AdminRequestProto.Builder adminBaseBuilder =
+        AdminRequestProto.newBuilder().setRequest(base).setType(AdminRequestOrResponseType.CatchupStatus.ordinal());
+    if (getPartitionId() != null) {
+      adminBaseBuilder.setPartitionId(ByteString.copyFrom(getPartitionId().getBytes()));
+    }
+    AdminRequestProto adminBase = adminBaseBuilder.build();
+    CatchupStatusAdminRequestProto request = CatchupStatusAdminRequestProto.newBuilder()
+        .setAcceptableLagInBytes(acceptableLagInBytes)
+        .setNumReplicasCaughtUpPerPartition(numReplicasCaughtUpPerPartition)
+        .build();
+    int size = adminBase.getSerializedSize() + request.getSerializedSize();
+    ByteBuf byteBuf = PooledByteBufAllocator.DEFAULT.ioBuffer(size);
+    try {
+      int writerIndex = byteBuf.writerIndex();
+      adminBase.writeTo(CodedOutputStream.newInstance(byteBuf.nioBuffer()));
+      byteBuf.writerIndex(writerIndex + adminBase.getSerializedSize());
+      request.writeTo(CodedOutputStream.newInstance(byteBuf.nioBuffer()));
+      byteBuf.writerIndex(writerIndex + request.getSerializedSize());
+    } catch (IOException e) {
+
+    }
+    return byteBuf;
+  }
+
+  public static CatchupStatusAdminRequest readProtobufFrom(ByteBuf byteBuf, AdminRequest adminRequest)
+      throws IOException {
+    CatchupStatusAdminRequestProto request = CatchupStatusAdminRequestProto.parseFrom(byteBuf.nioBuffer());
+    byteBuf.skipBytes(request.getSerializedSize());
+
+    return new CatchupStatusAdminRequest(request.getAcceptableLagInBytes(),
+        (short) request.getNumReplicasCaughtUpPerPartition(), adminRequest);
   }
 
   @Override
