@@ -19,7 +19,9 @@ import com.github.ambry.utils.Pair;
 import com.github.ambry.utils.Utils;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 
 
@@ -28,12 +30,14 @@ import java.util.Objects;
  * total composite blob size, and a list of keys for the blob's data chunks.
  */
 public class CompositeBlobInfo {
-
+  private final StorageClass storageClass;
   private final int chunkSize;
   private final long totalSize;
   private final List<Long> offsets = new ArrayList<>();
   private final List<ChunkMetadata> chunkMetadataList = new ArrayList<>();
   private final short metadataContentVersion;
+  // This will be filled up when the storage class is not REPLICATED
+  private final Map<StoreKey, List<StoreKey>> storeKeyToRSKeys = new HashMap<>();
 
   /**
    * Construct a {@link CompositeBlobInfo} object.
@@ -42,6 +46,7 @@ public class CompositeBlobInfo {
    * @param keys The list of keys for this object's data chunks.
    */
   public CompositeBlobInfo(int chunkSize, long totalSize, List<StoreKey> keys) {
+    this.storageClass = StorageClass.REPLICATED;
     this.chunkSize = chunkSize;
     if (chunkSize < 1L) {
       throw new IllegalArgumentException("chunkSize cannot be 0 or less");
@@ -74,6 +79,7 @@ public class CompositeBlobInfo {
     if (keysAndContentSizes == null || keysAndContentSizes.isEmpty()) {
       throw new IllegalArgumentException("keysAndContentSizes should not be null or empty");
     }
+    this.storageClass = StorageClass.REPLICATED;
     this.chunkSize = -1;
     long last = 0;
     metadataContentVersion = MessageFormatRecord.Metadata_Content_Version_V3;
@@ -85,6 +91,48 @@ public class CompositeBlobInfo {
       offsets.add(last);
       chunkMetadataList.add(new ChunkMetadata(key, last, keyAndContentSize.getSecond()));
       last += keyAndContentSize.getSecond();
+    }
+    this.totalSize = last;
+  }
+
+  public CompositeBlobInfo(StorageClass storageClass, List<Pair<StoreKey, Long>> keysAndContentSizes) {
+    this.storageClass = storageClass;
+    metadataContentVersion = MessageFormatRecord.Metadata_Content_Version_V4;
+    this.chunkSize = -1;
+    long last = 0;
+    if (storageClass == StorageClass.REPLICATED) {
+      for (Pair<StoreKey, Long> keyAndContentSize : keysAndContentSizes) {
+        if (keyAndContentSize.getSecond() < 1L) {
+          throw new IllegalArgumentException("CompositeBlobInfo can't be composed of blobs with size 0 or less");
+        }
+        StoreKey key = keyAndContentSize.getFirst();
+        offsets.add(last);
+        chunkMetadataList.add(new ChunkMetadata(key, last, keyAndContentSize.getSecond()));
+        last += keyAndContentSize.getSecond();
+      }
+    } else {
+      int numData = storageClass.getNumberOfDataChunks();
+      int numParity = storageClass.getNumberOfParityChunks();
+      int n = 0;
+      List<StoreKey> currentListOfChunkKeys = new ArrayList<>(numData + numParity);
+      for (Pair<StoreKey, Long> keyAndContentSize : keysAndContentSizes) {
+        if (keyAndContentSize.getSecond() < 1L) {
+          throw new IllegalArgumentException("CompositeBlobInfo can't be composed of blobs with size 0 or less");
+        }
+        n++;
+        StoreKey key = keyAndContentSize.getFirst();
+        if (n <= numData) {
+          offsets.add(last);
+          chunkMetadataList.add(new ChunkMetadata(key, last, keyAndContentSize.getSecond()));
+          last += keyAndContentSize.getSecond();
+          storeKeyToRSKeys.put(key, currentListOfChunkKeys);
+        }
+        currentListOfChunkKeys.add(key);
+        if (n == numData + numParity) {
+          n = 0;
+          currentListOfChunkKeys = new ArrayList<>(numData + numParity);
+        }
+      }
     }
     this.totalSize = last;
   }
@@ -128,6 +176,14 @@ public class CompositeBlobInfo {
     return totalSize;
   }
 
+  public StorageClass getStorageClass() {
+    return storageClass;
+  }
+
+  public List<StoreKey> getRSEncodingKeysForStoreKey(StoreKey key) {
+    return storeKeyToRSKeys.get(key);
+  }
+
   /**
    * Get the size of each data chunk in the composite blob except the last, which could possibly be smaller.
    * @return The chunk size in bytes.
@@ -166,14 +222,28 @@ public class CompositeBlobInfo {
    * and the offset of the data in the larger composite blob
    */
   public static class ChunkMetadata {
+    public enum ChunkType {
+      DATA_CHUNK, PARITY_CHUNK
+    }
+
+    private final ChunkType chunkType;
     private final StoreKey storeKey;
     private final long offset;
     private final long size;
 
     public ChunkMetadata(StoreKey storeKey, long offset, long size) {
+      this(ChunkType.DATA_CHUNK, storeKey, offset, size);
+    }
+
+    public ChunkMetadata(ChunkType chunkType, StoreKey storeKey, long offset, long size) {
+      this.chunkType = ChunkType.DATA_CHUNK;
       this.storeKey = storeKey;
       this.offset = offset;
       this.size = size;
+    }
+
+    public ChunkType getChunkType() {
+      return chunkType;
     }
 
     public StoreKey getStoreKey() {
@@ -190,16 +260,20 @@ public class CompositeBlobInfo {
 
     @Override
     public boolean equals(Object that) {
+      if (this == that) {
+        return true;
+      }
       if (that instanceof ChunkMetadata) {
         ChunkMetadata thatCM = (ChunkMetadata) that;
-        return storeKey.equals(thatCM.storeKey) && offset == thatCM.offset && size == thatCM.size;
+        return storeKey.equals(thatCM.storeKey) && offset == thatCM.offset && size == thatCM.size
+            && chunkType == thatCM.chunkType;
       }
       return false;
     }
 
     @Override
     public int hashCode() {
-      return Objects.hash(storeKey, offset, size);
+      return Objects.hash(storeKey, offset, size, chunkType);
     }
   }
 }

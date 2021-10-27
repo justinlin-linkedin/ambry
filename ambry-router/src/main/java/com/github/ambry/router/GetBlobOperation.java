@@ -31,6 +31,7 @@ import com.github.ambry.messageformat.MessageFormatFlags;
 import com.github.ambry.messageformat.MessageFormatRecord;
 import com.github.ambry.messageformat.MessageMetadata;
 import com.github.ambry.messageformat.MetadataContentSerDe;
+import com.github.ambry.messageformat.StorageClass;
 import com.github.ambry.network.Port;
 import com.github.ambry.network.RequestInfo;
 import com.github.ambry.network.ResponseInfo;
@@ -358,6 +359,10 @@ class GetBlobOperation extends GetOperation {
     return firstChunk.getChunkOperationTrackerInUse();
   }
 
+  boolean isRSEncoded() {
+    return compositeBlobInfo.getStorageClass() != StorageClass.REPLICATED;
+  }
+
   // ReadableStreamChannel implementation:
 
   /**
@@ -378,6 +383,16 @@ class GetBlobOperation extends GetOperation {
      * The GetChunk has issued requests and the operation on the chunk it holds is in progress.
      */
     InProgress,
+
+    /**
+     * Waiting other chunk's data to come back because of RS encoding.
+     */
+    RSBlocked,
+
+    /**
+     * Holding data for other chunk because this is part of RS encoding chunk.
+     */
+    RSBuffered,
 
     /**
      * The GetChunk is complete.

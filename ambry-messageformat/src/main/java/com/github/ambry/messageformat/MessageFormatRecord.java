@@ -57,6 +57,7 @@ public class MessageFormatRecord {
   public static final short Blob_Version_V2 = 2;
   public static final short Metadata_Content_Version_V2 = 2;
   public static final short Metadata_Content_Version_V3 = 3;
+  public static final short Metadata_Content_Version_V4 = 4;
   public static final int Message_Header_Invalid_Relative_Offset = -1;
 
   // Bumping version to a high number requires several things
@@ -1936,6 +1937,178 @@ public class MessageFormatRecord {
         throw new IllegalArgumentException("Key content sizes do not equal total size");
       }
       return new CompositeBlobInfo(keysAndContentSizes);
+    }
+  }
+
+  /**
+   *  - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+   * |         |                |             |            |            |          |            |            |          |
+   * | version |  storage class | total size  | # of keys  |  size of   |   key1   |  size of   |    key2    |  ......  |
+   * |(2 bytes)|  (2 bytes)     | (8 bytes)   | (4 bytes)  | key1 blob  |          | key2 blob  |            |  ......  |
+   * |         |                |             |            | (8 bytes)  |          | (8 bytes)  |            |          |
+   *  - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -  -- - - - - - - -
+   *
+   *  version           - the version of metadata content record
+   *
+   *  storage class     - total size of the object this metadata describes
+   *
+   *  # of keys         - number of keys in the metadata blob
+   *
+   *  size of key1 blob - size of the data referenced by key1
+   *
+   *  key1              - first key to be part of metadata blob
+   *
+   *  size of key2 blob - size of the data referenced by key2
+   *
+   *  key2              - second key to be part of metadata blob
+   *
+   */
+  public static class Metadata_Content_Format_V4 {
+    private static final int STORAGE_CLASS_FIELD_SIZE_IN_BYTES = 2;
+    private static final int TOTAL_SIZE_FIELD_SIZE_IN_BYTES = 8;
+    private static final int NUM_OF_KEYS_FIELD_SIZE_IN_BYTES = 4;
+    private static final int SIZE_OF_BLOB_FIELD_SIZE_IN_BYTES = 8;
+
+    /**
+     * Get the total size of the metadata content record.
+     * @param keySize The size of each key in bytes.
+     * @param numberOfKeys The total number of keys.
+     * @return The total size in bytes.
+     */
+    public static int getMetadataContentSize(int keySize, int numberOfKeys) {
+      return Version_Field_Size_In_Bytes + STORAGE_CLASS_FIELD_SIZE_IN_BYTES + TOTAL_SIZE_FIELD_SIZE_IN_BYTES
+          + NUM_OF_KEYS_FIELD_SIZE_IN_BYTES + numberOfKeys * (keySize + SIZE_OF_BLOB_FIELD_SIZE_IN_BYTES);
+    }
+
+    /**
+     * Serialize a metadata content record.
+     * @param outputBuffer output buffer of the serialized metadata content
+     * @param totalSize total size of the blob data content
+     * @param keysAndContentSizes list of data blob keys referenced by the metadata
+     *                            blob along with the data content sizes of each data blob
+     */
+    public static void serializeMetadataContentRecord(ByteBuffer outputBuffer, StorageClass storageClass,
+        long totalSize, List<Pair<StoreKey, Long>> keysAndContentSizes) {
+      validateKeysAndContentSizes(storageClass, totalSize, keysAndContentSizes);
+      int keySize = keysAndContentSizes.get(0).getFirst().sizeInBytes();
+      outputBuffer.putShort(Metadata_Content_Version_V4);
+      outputBuffer.putShort((short) storageClass.ordinal());
+      outputBuffer.putLong(totalSize);
+      outputBuffer.putInt(keysAndContentSizes.size());
+      for (Pair<StoreKey, Long> curr : keysAndContentSizes) {
+        if (curr.getFirst().sizeInBytes() != keySize) {
+          throw new IllegalArgumentException("Keys are not of same size");
+        }
+        outputBuffer.putLong(curr.getSecond());
+        outputBuffer.put(curr.getFirst().toBytes());
+      }
+    }
+
+    /**
+     * Deserialize a metadata content record from a stream.
+     * @param stream The stream to read the serialized record from.
+     * @param storeKeyFactory The factory to use for parsing keys in the serialized metadata content record.
+     * @return A {@link CompositeBlobInfo} object with the chunk size and list of keys from the record.
+     * @throws IOException
+     */
+    public static CompositeBlobInfo deserializeMetadataContentRecord(DataInputStream stream,
+        StoreKeyFactory storeKeyFactory) throws IOException {
+      List<Pair<StoreKey, Long>> keysAndContentSizes = new ArrayList<>();
+      StorageClass storageClass = StorageClass.values()[stream.readShort()];
+      long totalSize = stream.readLong();
+      long sum = 0;
+      int numberOfKeys = stream.readInt();
+      for (int i = 0; i < numberOfKeys; i++) {
+        long contentSize = stream.readLong();
+        StoreKey storeKey = storeKeyFactory.getStoreKey(stream);
+        keysAndContentSizes.add(new Pair<>(storeKey, contentSize));
+      }
+      validateKeysAndContentSizes(storageClass, totalSize, keysAndContentSizes);
+      return new CompositeBlobInfo(storageClass, keysAndContentSizes);
+    }
+
+    /**
+     * Verify the given keys and content sizes are valid according to the storage class.
+     * @param storageClass The {@link StorageClass}.
+     * @param totalSize The total size of the blob.
+     * @param keysAndContentSizes The list of store keys and the data sizes these keys are referencing to.
+     */
+    private static void validateKeysAndContentSizes(StorageClass storageClass, long totalSize,
+        List<Pair<StoreKey, Long>> keysAndContentSizes) {
+      if (storageClass == StorageClass.REPLICATED) {
+        // when storage class is REPLICATED, then we just have to make sure the sum of all the data chunk sizes equal
+        // to the total size.
+        long sum = keysAndContentSizes.stream().mapToLong(Pair::getSecond).sum();
+        if (sum != totalSize) {
+          throw new IllegalArgumentException("Key content sizes do not equal total size");
+        }
+      } else {
+        // A few things to verify here
+        int numData = storageClass.getNumberOfDataChunks();
+        int numParity = storageClass.getNumberOfParityChunks();
+        // The layout will be
+        // DataChunkBlobId, DataChunkBlobId ... ParityChunkBlobId, ParityChunkBlobId...
+        // DataChunkBlobId, DataChunkBlobId ... ParityChunkBlobId, ParityChunkBlobId...
+        // We have to make sure the data chunk has the same size except for the last one.
+        long dataChunkSize = keysAndContentSizes.get(0).getSecond();
+        if (keysAndContentSizes.size() <= numParity) {
+          throw new IllegalArgumentException(
+              "Blobs:" + keysAndContentSizes.size() + " are less then the number of parity chunks:" + numParity);
+        }
+        if (keysAndContentSizes.size() == 1 + numParity) {
+          // we only has one data chunk and it might not be a full size data chunk
+          if (totalSize != dataChunkSize) {
+            throw new IllegalArgumentException("Key content sizes do not equal total size");
+          }
+          for (Pair<StoreKey, Long> keyAndContentSize : keysAndContentSizes) {
+            if (keyAndContentSize.getSecond() != dataChunkSize) {
+              throw new IllegalArgumentException(
+                  "Size of chunk " + keyAndContentSize.getFirst() + " do not equal data chunk size");
+            }
+          }
+        } else {
+          // we have more than one data chunk, so the first data chunk's size is the size for all data chunk, except
+          // for last one
+          int numberOfDataChunks = (int) ((totalSize + dataChunkSize - 1) / dataChunkSize);
+          int numberOfPasses = (numberOfDataChunks + numData - 1) / numData;
+          int numberOfKeysRequired = numberOfDataChunks + numberOfPasses * numParity;
+          if (keysAndContentSizes.size() != numberOfKeysRequired) {
+            throw new IllegalArgumentException(
+                "Number of keys required:" + numberOfKeysRequired + " do not equal keys presented:"
+                    + keysAndContentSizes.size());
+          }
+          // The last data chunk might not have the same size
+          long sumOfDataChunks = 0;
+          int ind = 0;
+          for (int i = 0; i < numberOfPasses; i++) {
+            int numberOfChunks =
+                i != numberOfPasses - 1 ? numData + numParity : keysAndContentSizes.size() % (numData + numParity);
+            for (int j = 0; j < numberOfChunks - numParity; j++) {
+              Pair<StoreKey, Long> curr = keysAndContentSizes.get(ind);
+              sumOfDataChunks += curr.getSecond();
+              if (!(i == numberOfPasses - 1 && j == numberOfChunks - numParity - 1)
+                  && curr.getSecond() != dataChunkSize) {
+                throw new IllegalArgumentException(
+                    "Size of chunk " + curr.getFirst() + " do not equal data chunk size");
+              }
+              ind++;
+            }
+            long parityChunksSize =
+                numberOfChunks == 1 + numParity ? keysAndContentSizes.get(ind - 1).getSecond() : dataChunkSize;
+            for (int j = 0; j < numParity; j++) {
+              Pair<StoreKey, Long> curr = keysAndContentSizes.get(ind);
+              if (curr.getSecond() != parityChunksSize) {
+                throw new IllegalArgumentException(
+                    "Size of chunk " + curr.getFirst() + " do not equal parity chunk size");
+              }
+              ind++;
+            }
+          }
+          if (sumOfDataChunks != totalSize) {
+            throw new IllegalArgumentException("Key content sizes do not equal total size");
+          }
+        }
+      }
     }
   }
 }

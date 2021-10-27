@@ -21,7 +21,6 @@ import java.io.DataInputStream;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.List;
-import java.util.stream.Collectors;
 
 
 /**
@@ -61,6 +60,23 @@ public class MetadataContentSerDe {
   }
 
   /**
+   * Serialize the input list of keys with data content sizes that form the metadata content.
+   * @param storageClass the {@link StorageClass}.
+   * @param totalSize the total size of the object this metadata describes.
+   * @param keysAndContentSizes the input list of keys and related data content sizes that form the metadata content.
+   * @return a ByteBuffer containing the serialized output.
+   */
+  public static ByteBuffer serializeMetadataContentV4(StorageClass storageClass, long totalSize,
+      List<Pair<StoreKey, Long>> keysAndContentSizes) {
+    int bufSize = MessageFormatRecord.Metadata_Content_Format_V4.getMetadataContentSize(
+        keysAndContentSizes.get(0).getFirst().sizeInBytes(), keysAndContentSizes.size());
+    ByteBuffer outputBuf = ByteBuffer.allocate(bufSize);
+    MessageFormatRecord.Metadata_Content_Format_V4.serializeMetadataContentRecord(outputBuf, storageClass, totalSize,
+        keysAndContentSizes);
+    return outputBuf;
+  }
+
+  /**
    * Deserialize the serialized metadata content in the input ByteBuffer using the given {@link StoreKeyFactory} as a
    * reference.
    * @param buf ByteBuffer containing the serialized metadata content.
@@ -78,6 +94,9 @@ public class MetadataContentSerDe {
             new DataInputStream(new ByteBufferInputStream(buf)), storeKeyFactory);
       case MessageFormatRecord.Metadata_Content_Version_V3:
         return MessageFormatRecord.Metadata_Content_Format_V3.deserializeMetadataContentRecord(
+            new DataInputStream(new ByteBufferInputStream(buf)), storeKeyFactory);
+      case MessageFormatRecord.Metadata_Content_Version_V4:
+        return MessageFormatRecord.Metadata_Content_Format_V4.deserializeMetadataContentRecord(
             new DataInputStream(new ByteBufferInputStream(buf)), storeKeyFactory);
       default:
         throw new MessageFormatException("Unknown version encountered for MetadataContent: " + version,

@@ -53,6 +53,7 @@ public class ContainerBuilder {
   private boolean backupEnabled = BACKUP_ENABLED_DEFAULT_VALUE;
   private long lastModifiedTime = LAST_MODIFIED_TIME_DEFAULT_VALUE;
   private int snapshotVersion = SNAPSHOT_VERSION_DEFAULT_VALUE;
+  private boolean supportRSEncoding = SUPPORT_RS_ENCODING_DEFAULT_VALUE;
 
   /**
    * Constructor. This will allow building a new {@link Container} from an existing {@link Container}. The builder will
@@ -83,6 +84,7 @@ public class ContainerBuilder {
     backupEnabled = origin.isBackupEnabled();
     lastModifiedTime = origin.getLastModifiedTime();
     snapshotVersion = origin.getSnapshotVersion();
+    supportRSEncoding = origin.getSupportRSEncoding();
   }
 
   /**
@@ -299,6 +301,11 @@ public class ContainerBuilder {
     return this;
   }
 
+  public ContainerBuilder setSupportRSEncoding(boolean supportRSEncoding) {
+    this.supportRSEncoding = supportRSEncoding;
+    return this;
+  }
+
   /**
    * Builds a {@link Container} object. {@code id}, {@code name}, {@code status}, {@code isPrivate}, and
    * {@code parentAccountId} are required before build.
@@ -312,7 +319,7 @@ public class ContainerBuilder {
     return new Container(id, name, status, description, encrypted, previouslyEncrypted || encrypted, cacheable,
         mediaScanDisabled, replicationPolicy, ttlRequired, securePathRequired,
         contentTypeWhitelistForFilenamesOnDownload, backupEnabled, overrideAccountAcl, namedBlobMode,
-        parentAccountId == null ? UNKNOWN_CONTAINER_PARENT_ACCOUNT_ID : parentAccountId.shortValue(), deleteTriggerTime, lastModifiedTime,
-        snapshotVersion);
+        parentAccountId == null ? UNKNOWN_CONTAINER_PARENT_ACCOUNT_ID : parentAccountId.shortValue(), deleteTriggerTime,
+        lastModifiedTime, snapshotVersion, supportRSEncoding);
   }
 }
