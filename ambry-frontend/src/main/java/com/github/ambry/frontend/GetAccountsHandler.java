@@ -21,6 +21,7 @@ import com.github.ambry.account.AccountServiceException;
 import com.github.ambry.account.Container;
 import com.github.ambry.commons.ByteBufferReadableStreamChannel;
 import com.github.ambry.commons.Callback;
+import com.github.ambry.commons.CallbackUtils;
 import com.github.ambry.rest.RestRequest;
 import com.github.ambry.rest.RestRequestMetrics;
 import com.github.ambry.rest.RestResponseChannel;
@@ -28,10 +29,12 @@ import com.github.ambry.rest.RestServiceErrorCode;
 import com.github.ambry.rest.RestServiceException;
 import com.github.ambry.rest.RestUtils;
 import com.github.ambry.router.ReadableStreamChannel;
+import com.github.ambry.utils.Utils;
 import java.nio.ByteBuffer;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.GregorianCalendar;
+import java.util.concurrent.CompletableFuture;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -100,6 +103,25 @@ class GetAccountsHandler {
       restRequest.getMetricsTracker().injectMetrics(requestMetrics);
       // Start the callback chain by performing request security processing.
       securityService.processRequest(restRequest, securityProcessRequestCallback());
+      securityService.processRequest(restRequest)
+          .thenCompose(v -> securityService.postProcessRequest(restRequest))
+          .thenCompose(v -> CallbackUtils.fromCallback(securityPostProcessRequestCallback(), v))
+          .exceptionally(exception -> {
+            finalCallback.onCompletion(null, Utils.extractFutureExceptionCause(exception));
+            return null;
+          });
+
+      this.first(securityService.processRequest(restRequest))
+          .then(securityService.postProcessRequest(restRequest))
+          .then(securityService.)
+    }
+
+    private CallbackChain first(CompletableFuture<> future) {
+
+    }
+
+    private CallbackChain then(CompleteFuture<> future) {
+
     }
 
     /**

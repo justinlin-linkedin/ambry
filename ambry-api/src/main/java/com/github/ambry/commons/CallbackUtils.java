@@ -18,6 +18,7 @@ package com.github.ambry.commons;
 import com.github.ambry.utils.AsyncOperationTracker;
 import com.github.ambry.utils.ThrowingConsumer;
 import com.github.ambry.utils.Utils;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 
 
@@ -37,38 +38,54 @@ public class CallbackUtils {
    * @param successAction the action to take when the callback is called successfully. The result of the callback is
    *                      provided to this consumer. This consumer is allowed to throw an exception, in which case the
    *                      {@code failureCallback} will be called.
-   * @return the managed {@link Callback}.
-   */
-  public static <T> Callback<T> chainCallback(AsyncOperationTracker asyncOperationTracker, Callback<?> failureCallback,
-      ThrowingConsumer<? super T> successAction) {
+    * @return the managed {@link Callback}.
+    */
+public static <T> Callback<T> chainCallback(AsyncOperationTracker asyncOperationTracker, Callback<?> failureCallback,
+    ThrowingConsumer<? super T> successAction) {
     asyncOperationTracker.markOperationStart();
     return (result, exception) -> {
-      try {
-        asyncOperationTracker.markOperationEnd();
-        if (exception == null) {
-          successAction.accept(result);
-        }
-      } catch (Exception e) {
-        asyncOperationTracker.markCallbackProcessingError();
-        exception = e;
-      } finally {
-        if (exception != null) {
-          failureCallback.onCompletion(null, exception);
-        }
-        asyncOperationTracker.markCallbackProcessingEnd();
+    try {
+    asyncOperationTracker.markOperationEnd();
+    if (exception == null) {
+    successAction.accept(result);
+    }
+    } catch (Exception e) {
+    asyncOperationTracker.markCallbackProcessingError();
+    exception = e;
+    } finally {
+    if (exception != null) {
+    failureCallback.onCompletion(null, exception);
+    }
+    asyncOperationTracker.markCallbackProcessingEnd();
+    }
+    };
+    }
+
+/**
+ * Call an Ambry callback when a {@link CompletionStage} is completed, appropriately handling exception wrapping
+ * by the future implementation.
+ * @param completionStage the {@link CompletionStage} to attach to.
+ * @param callback the {@link Callback} to call upon completion.
+ * @param <T> the type of the future and callback.
+ */
+public static <T> void callCallbackAfter(CompletionStage<T> completionStage, Callback<T> callback) {
+    completionStage.whenComplete(
+    (result, throwable) -> callback.onCompletion(result, Utils.extractFutureExceptionCause(throwable)));
+    }
+
+public static <T> Callback<T> fromCompletableFuture(CompletableFuture<T> future) {
+    return (result, exception) -> {
+      if (exception != null) {
+        future.completeExceptionally(exception);
+      } else {
+        future.complete(result);
       }
     };
   }
 
-  /**
-   * Call an Ambry callback when a {@link CompletionStage} is completed, appropriately handling exception wrapping
-   * by the future implementation.
-   * @param completionStage the {@link CompletionStage} to attach to.
-   * @param callback the {@link Callback} to call upon completion.
-   * @param <T> the type of the future and callback.
-   */
-  public static <T> void callCallbackAfter(CompletionStage<T> completionStage, Callback<T> callback) {
-    completionStage.whenComplete(
-        (result, throwable) -> callback.onCompletion(result, Utils.extractFutureExceptionCause(throwable)));
+  public static <T> CompletableFuture<Void> fromCallback(Callback<T> callback, T result) {
+    return CompletableFuture.runAsync(() -> {
+      callback.onCompletion(result, null);
+    });
   }
 }

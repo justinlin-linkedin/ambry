@@ -14,11 +14,13 @@
 package com.github.ambry.frontend;
 
 import com.github.ambry.commons.Callback;
+import com.github.ambry.commons.CallbackUtils;
 import com.github.ambry.messageformat.BlobInfo;
 import com.github.ambry.rest.RestRequest;
 import com.github.ambry.rest.RestResponseChannel;
 import com.github.ambry.router.FutureResult;
 import java.io.Closeable;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Future;
 
 
@@ -83,10 +85,10 @@ public interface SecurityService extends Closeable {
    * @param restRequest {@link RestRequest} upon which validations has to be performed
    * @return a {@link Future} that is completed when the pre-processing is done.
    */
-  default Future<Void> preProcessRequest(RestRequest restRequest) {
-    FutureResult<Void> futureResult = new FutureResult<>();
-    preProcessRequest(restRequest, futureResult::done);
-    return futureResult;
+  default CompletableFuture<Void> preProcessRequest(RestRequest restRequest) {
+    CompletableFuture<Void> future = new CompletableFuture<>();
+    preProcessRequest(restRequest, CallbackUtils.fromCompletableFuture(future));
+    return future;
   }
 
   /**
@@ -95,10 +97,10 @@ public interface SecurityService extends Closeable {
    * @param restRequest {@link RestRequest} upon which validations has to be performed
    * @return a {@link Future} that is completed when the processing is done.
    */
-  default Future<Void> processRequest(RestRequest restRequest) {
-    FutureResult<Void> futureResult = new FutureResult<>();
-    processRequest(restRequest, futureResult::done);
-    return futureResult;
+  default CompletableFuture<Void> processRequest(RestRequest restRequest) {
+    CompletableFuture<Void> future = new CompletableFuture<>();
+    processRequest(restRequest, CallbackUtils.fromCompletableFuture(future));
+    return future;
   }
 
   /**
@@ -107,10 +109,10 @@ public interface SecurityService extends Closeable {
    * @param restRequest {@link RestRequest} upon which validations has to be performed
    * @return a {@link Future} that is completed when the post-processing is done.
    */
-  default Future<Void> postProcessRequest(RestRequest restRequest) {
-    FutureResult<Void> futureResult = new FutureResult<>();
-    postProcessRequest(restRequest, futureResult::done);
-    return futureResult;
+  default CompletableFuture<Void> postProcessRequest(RestRequest restRequest) {
+    CompletableFuture<Void> future = new CompletableFuture<>();
+    postProcessRequest(restRequest, CallbackUtils.fromCompletableFuture(future));
+    return future;
   }
 
   /**
