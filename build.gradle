@@ -213,6 +213,31 @@ project(':ambry-api') {
     }
 }
 
+project(':ambry-messageformat') {
+    dependencies {
+        compile project(':ambry-api'),
+                project(':ambry-utils')
+        compile "io.dropwizard.metrics:metrics-core:$metricsVersion"
+        testCompile project(':ambry-test-utils')
+        testCompile project(path: ':ambry-api', configuration: 'testArchives')
+    }
+}
+
+project(':ambry-commons') {
+    dependencies {
+        compile project(':ambry-api'),
+                project(':ambry-messageformat'),
+                project(':ambry-utils')
+        compile "org.conscrypt:conscrypt-openjdk-uber:$conscryptVersion"
+        compile "io.netty:netty-all:$nettyVersion"
+        compile "io.netty:netty-tcnative-boringssl-static:$nettyTcnativeVersion"
+        compile "org.apache.helix:helix-core:$helixVersion"
+        testCompile project(':ambry-test-utils')
+        testCompile project(path: ':ambry-clustermap', configuration: 'testArchives')
+    }
+}
+
+
 project(':ambry-account') {
     dependencies {
         compile project(':ambry-api'),
@@ -243,19 +268,6 @@ project(':ambry-clustermap') {
     }
 }
 
-project(':ambry-commons') {
-    dependencies {
-        compile project(':ambry-api'),
-                project(':ambry-messageformat'),
-                project(':ambry-utils')
-        compile "org.conscrypt:conscrypt-openjdk-uber:$conscryptVersion"
-        compile "io.netty:netty-all:$nettyVersion"
-        compile "io.netty:netty-tcnative-boringssl-static:$nettyTcnativeVersion"
-        compile "org.apache.helix:helix-core:$helixVersion"
-        testCompile project(':ambry-test-utils')
-        testCompile project(path: ':ambry-clustermap', configuration: 'testArchives')
-    }
-}
 
 project(':ambry-network') {
     dependencies {
@@ -322,15 +334,6 @@ project(':ambry-store') {
     }
 }
 
-project(':ambry-messageformat') {
-    dependencies {
-        compile project(':ambry-api'),
-                project(':ambry-utils')
-        compile "io.dropwizard.metrics:metrics-core:$metricsVersion"
-        testCompile project(':ambry-test-utils')
-        testCompile project(path: ':ambry-api', configuration: 'testArchives')
-    }
-}
 
 project(':ambry-replication') {
     dependencies {
