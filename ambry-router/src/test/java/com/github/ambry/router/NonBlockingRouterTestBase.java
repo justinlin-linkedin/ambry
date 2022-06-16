@@ -54,6 +54,7 @@ import java.util.Properties;
 import java.util.Random;
 import java.util.Set;
 import java.util.TreeMap;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
@@ -227,7 +228,8 @@ public class NonBlockingRouterTestBase {
    * Setup test suite to perform a {@link Router#putBlob} call using random account and container ids.
    */
   protected void setOperationParams(int putContentSize, long ttlSecs) {
-    setOperationParams(putContentSize, ttlSecs, Utils.getRandomShort(TestUtils.RANDOM), Utils.getRandomShort(TestUtils.RANDOM));
+    setOperationParams(putContentSize, ttlSecs, Utils.getRandomShort(TestUtils.RANDOM),
+        Utils.getRandomShort(TestUtils.RANDOM));
   }
 
   /**
@@ -238,8 +240,9 @@ public class NonBlockingRouterTestBase {
    * @param containerId container id for the blob.
    */
   protected void setOperationParams(int putContentSize, long ttlSecs, short accountId, short containerId) {
-    putBlobProperties = new BlobProperties(-1, "serviceId", "memberId", "contentType", false, ttlSecs,
-        accountId, containerId, testEncryption, null, null, null);
+    putBlobProperties =
+        new BlobProperties(-1, "serviceId", "memberId", "contentType", false, ttlSecs, accountId, containerId,
+            testEncryption, null, null, null);
     putUserMetadata = new byte[USER_METADATA_SIZE];
     random.nextBytes(putUserMetadata);
     putContent = new byte[putContentSize];
@@ -538,8 +541,13 @@ public class NonBlockingRouterTestBase {
     Future<String> future =
         router.putBlob(putBlobProperties, putUserMetadata, putChannel, new PutBlobOptionsBuilder().build());
     Assert.assertTrue(future.isDone());
-    RouterException e = (RouterException) ((FutureResult<String>) future).error();
-    Assert.assertEquals(e.getErrorCode(), RouterErrorCode.RouterClosed);
+    try {
+      ((CompletableFuture<?>) future).join();
+      Assert.fail("Excepting failure");
+    } catch (Exception e) {
+      RouterException routerException = (RouterException) Utils.extractFutureExceptionCause(e);
+      Assert.assertEquals(routerException.getErrorCode(), RouterErrorCode.RouterClosed);
+    }
   }
 
   /**
@@ -573,10 +581,15 @@ public class NonBlockingRouterTestBase {
     }
     router.close();
     // check that ttl update won't work after router close
-    Future<Void> future = router.updateBlobTtl(blobId, updateServiceId, Utils.Infinite_Time);
+    CompletableFuture<Void> future = router.updateBlobTtl(blobId, updateServiceId, Utils.Infinite_Time);
     Assert.assertTrue(future.isDone());
-    RouterException e = (RouterException) ((FutureResult<Void>) future).error();
-    Assert.assertEquals(e.getErrorCode(), RouterErrorCode.RouterClosed);
+    try {
+      future.join();
+      Assert.fail("Expecting a failure");
+    } catch (Exception e) {
+      RouterException routerException = (RouterException) Utils.extractFutureExceptionCause(e);
+      Assert.assertEquals(routerException.getErrorCode(), RouterErrorCode.RouterClosed);
+    }
   }
 
   /**

@@ -195,7 +195,7 @@ public interface Router extends Closeable {
    *                    permanent
    * @return A future that would contain information about whether the update succeeded or not, eventually.
    */
-  default Future<Void> updateBlobTtl(String blobId, String serviceId, long expiresAtMs) {
+  default CompletableFuture<Void> updateBlobTtl(String blobId, String serviceId, long expiresAtMs) {
     CompletableFuture<Void> future = new CompletableFuture<>();
     updateBlobTtl(blobId, serviceId, expiresAtMs, CallbackUtils.fromCompletableFuture(future), null);
     return future;
@@ -208,7 +208,7 @@ public interface Router extends Closeable {
    * @param serviceId The service ID of the service undeleting the blob. This can be null if unknown.
    * @return A future that would contain information about whether the undelete succeeded or not, eventually.
    */
-  default Future<Void> undeleteBlob(String blobId, String serviceId) {
+  default CompletableFuture<Void> undeleteBlob(String blobId, String serviceId) {
     CompletableFuture<Void> future = new CompletableFuture<>();
     undeleteBlob(blobId, serviceId, CallbackUtils.fromCompletableFuture(future), null);
     return future;
