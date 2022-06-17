@@ -19,6 +19,8 @@ import java.time.Duration;
 import java.util.concurrent.Callable;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
+import java.util.concurrent.Executor;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeoutException;
@@ -237,5 +239,36 @@ public class FutureUtils {
       return promise.completeExceptionally(ex);
     }, duration.toMillis(), MILLISECONDS);
     return promise;
+  }
+
+  public static <T> CompletableFuture<T> fromCallable(Callable<T> callable) {
+    CompletableFuture<T> future = new CompletableFuture<>();
+    try {
+      future.complete(callable.call());
+    } catch (Exception e) {
+      future.completeExceptionally(e);
+    }
+    return future;
+  }
+
+  public static <T, V> CompletableFuture<V> replaceReturnValue(CompletableFuture<T> future, V newValue) {
+    CompletableFuture<V> newFuture = new CompletableFuture<>();
+    future.whenComplete((result, exception) -> {
+      if (exception != null) {
+        newFuture.completeExceptionally(Utils.extractFutureExceptionCause(exception));
+      } else {
+        newFuture.complete(newValue);
+      }
+    });
+    return newFuture;
+  }
+
+  public static class CurrentThreadExecutor implements Executor {
+    public static final CurrentThreadExecutor DEFAULT = new CurrentThreadExecutor();
+
+    @Override
+    public void execute(Runnable runnable) {
+      runnable.run();
+    }
   }
 }

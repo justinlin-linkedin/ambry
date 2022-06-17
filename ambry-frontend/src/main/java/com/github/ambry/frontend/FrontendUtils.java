@@ -24,6 +24,7 @@ import com.github.ambry.commons.CallbackUtils;
 import com.github.ambry.router.ReadableStreamChannel;
 import com.github.ambry.utils.AsyncOperationTracker;
 import com.github.ambry.utils.ThrowingConsumer;
+import com.github.ambry.utils.Utils;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
@@ -32,6 +33,8 @@ import java.io.OutputStreamWriter;
 import java.io.Writer;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
+import java.util.concurrent.CompletableFuture;
+import java.util.function.Supplier;
 import org.json.JSONObject;
 import org.json.JSONTokener;
 import org.slf4j.Logger;
@@ -69,6 +72,15 @@ class FrontendUtils {
       String context, Logger logger, Callback<V> finalCallback) {
     AsyncOperationTracker tracker = new AsyncOperationTracker(context, logger, metrics);
     return CallbackUtils.chainCallback(tracker, finalCallback, successAction);
+  }
+
+  static <T> CompletableFuture<T> buildContextOnFuture(Supplier<CompletableFuture<T>> supplier,
+      AsyncOperationTracker.Metrics metrics, String context, Logger logger) {
+    AsyncOperationTracker tracker = new AsyncOperationTracker(context, logger, metrics);
+    tracker.markOperationStart();
+    CompletableFuture<T> future = supplier.get();
+    future.whenComplete((r, e) -> tracker.markOperationEnd());
+    return future;
   }
 
   /**

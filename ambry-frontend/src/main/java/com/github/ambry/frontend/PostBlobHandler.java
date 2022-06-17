@@ -16,10 +16,12 @@ package com.github.ambry.frontend;
 import com.github.ambry.account.Container;
 import com.github.ambry.commons.BlobId;
 import com.github.ambry.commons.Callback;
+import com.github.ambry.commons.FutureUtils;
 import com.github.ambry.commons.RetainingAsyncWritableChannel;
 import com.github.ambry.config.FrontendConfig;
 import com.github.ambry.messageformat.BlobInfo;
 import com.github.ambry.messageformat.BlobProperties;
+import com.github.ambry.quota.QuotaChargeCallback;
 import com.github.ambry.quota.QuotaManager;
 import com.github.ambry.quota.QuotaUtils;
 import com.github.ambry.rest.RequestPath;
@@ -40,11 +42,14 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 import org.json.JSONObject;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import static com.github.ambry.commons.FutureUtils.*;
 import static com.github.ambry.frontend.FrontendUtils.*;
 
 
@@ -114,309 +119,177 @@ class PostBlobHandler {
    * @param callback the {@link Callback} to invoke when the response is ready (or if there is an exception).
    */
   void handle(RestRequest restRequest, RestResponseChannel restResponseChannel, Callback<Void> callback) {
-    new CallbackChain(restRequest, restResponseChannel, callback).start();
+    restRequest.getMetricsTracker()
+        .injectMetrics(frontendMetrics.postBlobMetricsGroup.getRestRequestMetrics(restRequest.isSslUsed(), false));
+
+    String context = restRequest.getUri();
+    AtomicReference<BlobInfo> blobInfoRef = new AtomicReference<>();
+    AtomicReference<String> blobIdRef = new AtomicReference<>();
+    CompletableFuture<PutBlobOptions> putBlobOptionsFuture =
+        FutureUtils.fromCallable(() -> getBlobInfoFromRequest(restRequest, restResponseChannel))
+            .thenAccept(blobInfo -> blobInfoRef.set(blobInfo))
+            .thenCompose(v -> buildContextOnFuture(() -> securityService.processRequest(restRequest),
+                frontendMetrics.postSecurityProcessRequestMetrics, context, LOGGER))
+            .thenCompose(v -> buildContextOnFuture(() -> securityService.postProcessRequest(restRequest),
+                frontendMetrics.postSecurityPostProcessRequestMetrics, context, LOGGER))
+            .thenCompose(v -> FutureUtils.fromCallable(() -> getPutBlobOptionsFromRequest(restRequest)));
+    CompletableFuture<String> blobIdFuture;
+    if (RestUtils.getRequestPath(restRequest).matchesOperation(Operations.STITCH)) {
+      blobIdFuture = putBlobOptionsFuture.thenCompose(v -> buildContextOnFuture(() -> {
+        RetainingAsyncWritableChannel channel =
+            new RetainingAsyncWritableChannel(frontendConfig.maxJsonRequestSizeBytes);
+        return FutureUtils.replaceReturnValue(restRequest.readInto(channel), channel);
+      }, frontendMetrics.postReadStitchRequestMetrics, context, LOGGER).thenCompose(channel -> FutureUtils.fromCallable(
+              () -> getChunksToStitch(restResponseChannel, blobInfoRef.get().getBlobProperties(),
+                  readJsonFromChannel(channel))))
+          .thenCompose(chunkInfos -> buildContextOnFuture(
+              () -> router.stitchBlob(blobInfoRef.get().getBlobProperties(), blobInfoRef.get().getUserMetadata(),
+                  chunkInfos, QuotaUtils.buildQuotaChargeCallback(restRequest, quotaManager, false)),
+              frontendMetrics.postRouterStitchBlobMetrics, context, LOGGER)));
+    } else {
+      blobIdFuture = putBlobOptionsFuture.thenCompose(putOptions -> buildContextOnFuture(
+          () -> router.putBlob(blobInfoRef.get().getBlobProperties(), blobInfoRef.get().getUserMetadata(), restRequest,
+              putOptions, QuotaUtils.buildQuotaChargeCallback(restRequest, quotaManager, true)),
+          frontendMetrics.postRouterPutBlobMetrics, context, LOGGER));
+    }
+    blobIdFuture.thenAccept(blobId -> blobIdRef.set(blobId))
+        .thenCompose(v -> FutureUtils.fromCallable(() -> {
+          setSignedIdMetadataAndBlobSize(restRequest, restResponseChannel, blobInfoRef.get().getBlobProperties());
+          return null;
+        }))
+        .thenCompose(v -> buildContextOnFuture(() -> idConverter.convert(restRequest, blobIdRef.get()),
+            frontendMetrics.postIdConversionMetrics, context, LOGGER))
+        .thenAccept(convertedBlobId -> restResponseChannel.setHeader(RestUtils.Headers.LOCATION, convertedBlobId))
+        .thenCompose(v -> buildContextOnFuture(
+            () -> securityService.processResponse(restRequest, restResponseChannel, blobInfoRef.get()),
+            frontendMetrics.postSecurityProcessResponseMetrics, context, LOGGER))
+        .whenComplete((r, e) -> {
+          if (e != null) {
+            callback.onCompletion(null, Utils.extractFutureExceptionCause(e));
+          } else {
+            callback.onCompletion(r, null);
+          }
+        });
   }
 
-  /**
-   * Represents the chain of actions to take. Keeps request context that is relevant to all callback stages.
-   */
-  private class CallbackChain {
-    private final RestRequest restRequest;
-    private final String uri;
-    private final RestResponseChannel restResponseChannel;
-    private final Callback<Void> finalCallback;
-
-    /**
-     * @param restRequest the {@link RestRequest}.
-     * @param restResponseChannel the {@link RestResponseChannel}.
-     * @param finalCallback the {@link Callback} to call on completion.
-     */
-    private CallbackChain(RestRequest restRequest, RestResponseChannel restResponseChannel,
-        Callback<Void> finalCallback) {
-      this.restRequest = restRequest;
-      this.restResponseChannel = restResponseChannel;
-      this.finalCallback = finalCallback;
-      this.uri = restRequest.getUri();
+  private BlobInfo getBlobInfoFromRequest(RestRequest restRequest, RestResponseChannel restResponseChannel)
+      throws RestServiceException {
+    long propsBuildStartTime = System.currentTimeMillis();
+    accountAndContainerInjector.injectAccountAndContainerForPostRequest(restRequest,
+        frontendMetrics.postBlobMetricsGroup);
+    BlobProperties blobProperties = RestUtils.buildBlobProperties(restRequest.getArgs());
+    Container container = RestUtils.getContainerFromArgs(restRequest.getArgs());
+    if (blobProperties.getTimeToLiveInSeconds() + TimeUnit.MILLISECONDS.toSeconds(blobProperties.getCreationTimeInMs())
+        > Integer.MAX_VALUE) {
+      LOGGER.debug("TTL set to very large value in POST request with BlobProperties {}", blobProperties);
+      frontendMetrics.ttlTooLargeError.inc();
+    } else if (container.isTtlRequired() && (blobProperties.getTimeToLiveInSeconds() == Utils.Infinite_Time
+        || blobProperties.getTimeToLiveInSeconds() > frontendConfig.maxAcceptableTtlSecsIfTtlRequired)) {
+      String descriptor = RestUtils.getAccountFromArgs(restRequest.getArgs()).getName() + ":" + container.getName();
+      if (frontendConfig.failIfTtlRequiredButNotProvided) {
+        throw new RestServiceException(
+            "TTL < " + frontendConfig.maxAcceptableTtlSecsIfTtlRequired + " is required for upload to " + descriptor,
+            RestServiceErrorCode.InvalidArgs);
+      } else {
+        LOGGER.debug("{} attempted an upload with ttl {} to {}", blobProperties.getServiceId(),
+            blobProperties.getTimeToLiveInSeconds(), descriptor);
+        frontendMetrics.ttlNotCompliantError.inc();
+        restResponseChannel.setHeader(RestUtils.Headers.NON_COMPLIANCE_WARNING,
+            "TTL < " + frontendConfig.maxAcceptableTtlSecsIfTtlRequired + " will be required for future uploads");
+      }
     }
-
-    /**
-     * Start the chain by parsing the blob info headers in the request and calling
-     * {@link SecurityService#processRequest} to perform additional request time security checks.
-     */
-    private void start() {
-      // Metrics initialization. Can potentially be updated after parsing blob properties.
+    // inject encryption frontendMetrics if applicable
+    if (blobProperties.isEncrypted()) {
       restRequest.getMetricsTracker()
-          .injectMetrics(frontendMetrics.postBlobMetricsGroup.getRestRequestMetrics(restRequest.isSslUsed(), false));
-      try {
-        // Start the callback chain by parsing blob info headers and performing request security processing.
-        BlobInfo blobInfo = getBlobInfoFromRequest();
-        checkUploadRequirements(blobInfo.getBlobProperties());
-        securityService.processRequest(restRequest, securityProcessRequestCallback(blobInfo));
-      } catch (Exception e) {
-        finalCallback.onCompletion(null, e);
-      }
+          .injectMetrics(frontendMetrics.postBlobMetricsGroup.getRestRequestMetrics(restRequest.isSslUsed(), true));
     }
+    byte[] userMetadata = RestUtils.buildUserMetadata(restRequest.getArgs());
+    frontendMetrics.blobPropsBuildTimeInMs.update(System.currentTimeMillis() - propsBuildStartTime);
+    LOGGER.trace("Blob properties of blob being POSTed - {}", blobProperties);
+    return new BlobInfo(blobProperties, userMetadata);
+  }
 
-    /**
-     * After {@link SecurityService#processRequest} finishes, call {@link SecurityService#postProcessRequest} to perform
-     * request time security checks that rely on the request being fully parsed and any additional arguments set.
-     * @param blobInfo the {@link BlobInfo} to carry to future stages.
-     * @return a {@link Callback} to be used with {@link SecurityService#processRequest}.
-     */
-    private Callback<Void> securityProcessRequestCallback(BlobInfo blobInfo) {
-      return buildCallback(frontendMetrics.postSecurityProcessRequestMetrics,
-          securityCheckResult -> securityService.postProcessRequest(restRequest,
-              securityPostProcessRequestCallback(blobInfo)), uri, LOGGER, finalCallback);
+  private PutBlobOptions getPutBlobOptionsFromRequest(RestRequest restRequest) throws RestServiceException {
+    PutBlobOptionsBuilder builder =
+        new PutBlobOptionsBuilder().chunkUpload(RestUtils.isChunkUpload(restRequest.getArgs()))
+            .restRequest(restRequest);
+    Long maxUploadSize = RestUtils.getLongHeader(restRequest.getArgs(), RestUtils.Headers.MAX_UPLOAD_SIZE, false);
+    if (maxUploadSize != null) {
+      builder.maxUploadSize(maxUploadSize);
     }
+    return builder.build();
+  }
 
-    /**
-     * After {@link SecurityService#postProcessRequest} finishes, call {@link Router#putBlob} to persist the blob in the
-     * storage layer.
-     * @param blobInfo the {@link BlobInfo} to make the router call with.
-     * @return a {@link Callback} to be used with {@link SecurityService#postProcessRequest}.
-     */
-    private Callback<Void> securityPostProcessRequestCallback(BlobInfo blobInfo) {
-      return buildCallback(frontendMetrics.postSecurityPostProcessRequestMetrics, securityCheckResult -> {
-        if (RestUtils.getRequestPath(restRequest).matchesOperation(Operations.STITCH)) {
-          RetainingAsyncWritableChannel channel =
-              new RetainingAsyncWritableChannel(frontendConfig.maxJsonRequestSizeBytes);
-          restRequest.readInto(channel, fetchStitchRequestBodyCallback(channel, blobInfo));
-        } else {
-          PutBlobOptions options = getPutBlobOptionsFromRequest();
-          router.putBlob(blobInfo.getBlobProperties(), blobInfo.getUserMetadata(), restRequest, options,
-              routerPutBlobCallback(blobInfo),
-              QuotaUtils.buildQuotaChargeCallback(restRequest, quotaManager, true));
-        }
-      }, uri, LOGGER, finalCallback);
+  private void setSignedIdMetadataAndBlobSize(RestRequest restRequest, RestResponseChannel restResponseChannel,
+      BlobProperties blobProperties) throws RestServiceException {
+    if (RestUtils.isChunkUpload(restRequest.getArgs())) {
+      Map<String, String> metadata = new HashMap<>(2);
+      metadata.put(RestUtils.Headers.BLOB_SIZE, Long.toString(restRequest.getBlobBytesReceived()));
+      metadata.put(RestUtils.Headers.SESSION,
+          RestUtils.getHeader(restRequest.getArgs(), RestUtils.Headers.SESSION, true));
+      metadata.put(EXPIRATION_TIME_MS_KEY,
+          Long.toString(Utils.addSecondsToEpochTime(time.milliseconds(), blobProperties.getTimeToLiveInSeconds())));
+      restRequest.setArg(RestUtils.InternalKeys.SIGNED_ID_METADATA_KEY, metadata);
     }
+    //the actual blob size is the number of bytes read
+    restResponseChannel.setHeader(RestUtils.Headers.BLOB_SIZE, restRequest.getBlobBytesReceived());
+  }
 
-    /**
-     * After reading the body of the stitch request, parse the request body,
-     * and make a call to {@link Router#stitchBlob}.
-     * @param channel the {@link RetainingAsyncWritableChannel} that will contain the request body.
-     * @param blobInfo the {@link BlobInfo} to make the router call with.
-     * @return a {@link Callback} to be used with {@link RestRequest#readInto}.
-     */
-    private Callback<Long> fetchStitchRequestBodyCallback(RetainingAsyncWritableChannel channel, BlobInfo blobInfo) {
-      return buildCallback(frontendMetrics.postReadStitchRequestMetrics,
-          bytesRead -> router.stitchBlob(blobInfo.getBlobProperties(), blobInfo.getUserMetadata(),
-              getChunksToStitch(blobInfo.getBlobProperties(), readJsonFromChannel(channel)),
-              routerStitchBlobCallback(blobInfo),
-              QuotaUtils.buildQuotaChargeCallback(restRequest, quotaManager, false)), uri, LOGGER,
-          finalCallback);
+  List<ChunkInfo> getChunksToStitch(RestResponseChannel restResponseChannel, BlobProperties stitchedBlobProperties,
+      JSONObject stitchRequestJson) throws RestServiceException {
+    List<String> signedChunkIds = StitchRequestSerDe.fromJson(stitchRequestJson);
+    if (signedChunkIds.isEmpty()) {
+      throw new RestServiceException("Must provide at least one ID in stitch request",
+          RestServiceErrorCode.MissingArgs);
     }
-
-    /**
-     * After {@link Router#putBlob} finishes, call {@link IdConverter#convert} to convert the returned ID into a format
-     * that will be returned in the "Location" header.
-     * @param blobInfo the {@link BlobInfo} to make the router call with.
-     * @return a {@link Callback} to be used with {@link Router#putBlob}.
-     */
-    private Callback<String> routerStitchBlobCallback(BlobInfo blobInfo) {
-      return buildCallback(frontendMetrics.postRouterStitchBlobMetrics,
-          blobId -> idConverter.convert(restRequest, blobId, blobInfo, idConverterCallback(blobInfo)), uri, LOGGER,
-          finalCallback);
-    }
-
-    /**
-     * After {@link Router#putBlob} finishes, call {@link IdConverter#convert} to convert the returned ID into a format
-     * that will be returned in the "Location" header.
-     * @param blobInfo the {@link BlobInfo} to make the router call with.
-     * @return a {@link Callback} to be used with {@link Router#putBlob}.
-     */
-    private Callback<String> routerPutBlobCallback(BlobInfo blobInfo) {
-      return buildCallback(frontendMetrics.postRouterPutBlobMetrics, blobId -> {
-        setSignedIdMetadataAndBlobSize(blobInfo.getBlobProperties());
-        idConverter.convert(restRequest, blobId, idConverterCallback(blobInfo));
-      }, uri, LOGGER, finalCallback);
-    }
-
-    /**
-     * After {@link IdConverter#convert} finishes, set the "Location" header and call
-     * {@link SecurityService#processResponse}.
-     * @param blobInfo the {@link BlobInfo} to use for security checks.
-     * @return a {@link Callback} to be used with {@link IdConverter#convert}.
-     */
-    private Callback<String> idConverterCallback(BlobInfo blobInfo) {
-      return buildCallback(frontendMetrics.postIdConversionMetrics, convertedBlobId -> {
-        restResponseChannel.setHeader(RestUtils.Headers.LOCATION, convertedBlobId);
-        securityService.processResponse(restRequest, restResponseChannel, blobInfo, securityProcessResponseCallback());
-      }, uri, LOGGER, finalCallback);
-    }
-
-    /**
-     * After {@link SecurityService#processResponse}, call {@code finalCallback}.
-     * @return a {@link Callback} to be used with {@link SecurityService#processResponse}.
-     */
-    private Callback<Void> securityProcessResponseCallback() {
-      return buildCallback(frontendMetrics.postSecurityProcessResponseMetrics,
-          securityCheckResult -> finalCallback.onCompletion(null, null), uri, LOGGER, finalCallback);
-    }
-
-    /**
-     * Parse {@link BlobInfo} from the request arguments. This method will also ensure that the correct account and
-     * container objects are attached to the request.
-     * @return the {@link BlobInfo} parsed from the request arguments.
-     * @throws RestServiceException if there is an error while parsing the {@link BlobInfo} arguments.
-     */
-    private BlobInfo getBlobInfoFromRequest() throws RestServiceException {
-      long propsBuildStartTime = System.currentTimeMillis();
-      accountAndContainerInjector.injectAccountAndContainerForPostRequest(restRequest,
-          frontendMetrics.postBlobMetricsGroup);
-      BlobProperties blobProperties = RestUtils.buildBlobProperties(restRequest.getArgs());
-      Container container = RestUtils.getContainerFromArgs(restRequest.getArgs());
-      if (blobProperties.getTimeToLiveInSeconds() + TimeUnit.MILLISECONDS.toSeconds(
-          blobProperties.getCreationTimeInMs()) > Integer.MAX_VALUE) {
-        LOGGER.debug("TTL set to very large value in POST request with BlobProperties {}", blobProperties);
-        frontendMetrics.ttlTooLargeError.inc();
-      } else if (container.isTtlRequired() && (blobProperties.getTimeToLiveInSeconds() == Utils.Infinite_Time
-          || blobProperties.getTimeToLiveInSeconds() > frontendConfig.maxAcceptableTtlSecsIfTtlRequired)) {
-        String descriptor = RestUtils.getAccountFromArgs(restRequest.getArgs()).getName() + ":" + container.getName();
-        if (frontendConfig.failIfTtlRequiredButNotProvided) {
-          throw new RestServiceException(
-              "TTL < " + frontendConfig.maxAcceptableTtlSecsIfTtlRequired + " is required for upload to " + descriptor,
-              RestServiceErrorCode.InvalidArgs);
-        } else {
-          LOGGER.debug("{} attempted an upload with ttl {} to {}", blobProperties.getServiceId(),
-              blobProperties.getTimeToLiveInSeconds(), descriptor);
-          frontendMetrics.ttlNotCompliantError.inc();
-          restResponseChannel.setHeader(RestUtils.Headers.NON_COMPLIANCE_WARNING,
-              "TTL < " + frontendConfig.maxAcceptableTtlSecsIfTtlRequired + " will be required for future uploads");
-        }
-      }
-      // inject encryption frontendMetrics if applicable
-      if (blobProperties.isEncrypted()) {
-        restRequest.getMetricsTracker()
-            .injectMetrics(frontendMetrics.postBlobMetricsGroup.getRestRequestMetrics(restRequest.isSslUsed(), true));
-      }
-      byte[] userMetadata = RestUtils.buildUserMetadata(restRequest.getArgs());
-      frontendMetrics.blobPropsBuildTimeInMs.update(System.currentTimeMillis() - propsBuildStartTime);
-      LOGGER.trace("Blob properties of blob being POSTed - {}", blobProperties);
-      return new BlobInfo(blobProperties, userMetadata);
-    }
-
-    /**
-     * @return the {@link PutBlobOptions} to use, parsed from the request.
-     */
-    private PutBlobOptions getPutBlobOptionsFromRequest() throws RestServiceException {
-      PutBlobOptionsBuilder builder =
-          new PutBlobOptionsBuilder().chunkUpload(RestUtils.isChunkUpload(restRequest.getArgs())).restRequest(restRequest);
-      Long maxUploadSize = RestUtils.getLongHeader(restRequest.getArgs(), RestUtils.Headers.MAX_UPLOAD_SIZE, false);
-      if (maxUploadSize != null) {
-        builder.maxUploadSize(maxUploadSize);
-      }
-      return builder.build();
-    }
-
-    /**
-     * Attach the metadata to include in a signed ID to the {@link RestRequest} if the request is for a chunk upload.
-     * This will tell the ID converter that it needs to produce a signed ID to give back to the client.
-     * @param blobProperties the {@link BlobProperties} from the request.
-     * @throws RestServiceException
-     */
-    private void setSignedIdMetadataAndBlobSize(BlobProperties blobProperties) throws RestServiceException {
-      if (RestUtils.isChunkUpload(restRequest.getArgs())) {
-        Map<String, String> metadata = new HashMap<>(2);
-        metadata.put(RestUtils.Headers.BLOB_SIZE, Long.toString(restRequest.getBlobBytesReceived()));
-        metadata.put(RestUtils.Headers.SESSION,
-            RestUtils.getHeader(restRequest.getArgs(), RestUtils.Headers.SESSION, true));
-        metadata.put(EXPIRATION_TIME_MS_KEY,
-            Long.toString(Utils.addSecondsToEpochTime(time.milliseconds(), blobProperties.getTimeToLiveInSeconds())));
-        restRequest.setArg(RestUtils.InternalKeys.SIGNED_ID_METADATA_KEY, metadata);
-      }
-      //the actual blob size is the number of bytes read
-      restResponseChannel.setHeader(RestUtils.Headers.BLOB_SIZE, restRequest.getBlobBytesReceived());
-    }
-
-    /**
-     * Enforce any additional requirements for certain types of uploads like data chunk uploads.
-     * @param blobProperties the {@link BlobProperties} parsed from the request.
-     * @throws RestServiceException
-     */
-    private void checkUploadRequirements(BlobProperties blobProperties) throws RestServiceException {
-      if (RestUtils.isChunkUpload(restRequest.getArgs())) {
-        // ensure that the x-ambry-session header is present.
-        RestUtils.getHeader(restRequest.getArgs(), RestUtils.Headers.SESSION, true);
-        // validate that a max chunk size is set.
-        RestUtils.getLongHeader(restRequest.getArgs(), RestUtils.Headers.MAX_UPLOAD_SIZE, true);
-        // validate that the TTL for the chunk is set correctly.
-        long chunkTtl = blobProperties.getTimeToLiveInSeconds();
-        if (chunkTtl <= 0 || chunkTtl > frontendConfig.chunkUploadMaxChunkTtlSecs) {
-          throw new RestServiceException("Invalid chunk upload TTL: " + chunkTtl, RestServiceErrorCode.InvalidArgs);
-        }
-      }
-    }
-
-    /**
-     * Parse and verify the signed chunk IDs in the body of a stitch request.
-     * @param stitchedBlobProperties the {@link BlobProperties} for the final stitched blob.
-     * @param stitchRequestJson the {@link JSONObject} from the stitch request body.
-     * @return a list of chunks to stitch that can be provided to the router.
-     * @throws RestServiceException
-     */
-    List<ChunkInfo> getChunksToStitch(BlobProperties stitchedBlobProperties, JSONObject stitchRequestJson)
-        throws RestServiceException {
-      List<String> signedChunkIds = StitchRequestSerDe.fromJson(stitchRequestJson);
-      if (signedChunkIds.isEmpty()) {
-        throw new RestServiceException("Must provide at least one ID in stitch request",
-            RestServiceErrorCode.MissingArgs);
-      }
-      List<ChunkInfo> chunksToStitch = new ArrayList<>(signedChunkIds.size());
-      String expectedSession = null;
-      long totalStitchedBlobSize = 0;
-      for (String signedChunkId : signedChunkIds) {
-        signedChunkId =
-            RequestPath.parse(signedChunkId, Collections.emptyMap(), frontendConfig.pathPrefixesToRemove, clusterName)
-                .getOperationOrBlobId(false);
-        if (!idSigningService.isIdSigned(signedChunkId)) {
-          throw new RestServiceException("All chunks IDs must be signed: " + signedChunkId,
-              RestServiceErrorCode.BadRequest);
-        }
-        Pair<String, Map<String, String>> idAndMetadata = idSigningService.parseSignedId(signedChunkId);
-        String blobId = idAndMetadata.getFirst();
-        Map<String, String> metadata = idAndMetadata.getSecond();
-
-        expectedSession = RestUtils.verifyChunkUploadSession(metadata, expectedSession);
-        @SuppressWarnings("ConstantConditions")
-        long chunkSizeBytes = RestUtils.getLongHeader(metadata, RestUtils.Headers.BLOB_SIZE, true);
-
-        totalStitchedBlobSize += chunkSizeBytes;
-        // Expiration time is sent to the router, but not verified in this handler. The router is responsible for making
-        // checks related to internal ambry requirements, like making sure that the chunks do not expire before the
-        // metadata blob.
-        @SuppressWarnings("ConstantConditions")
-        long expirationTimeMs = RestUtils.getLongHeader(metadata, EXPIRATION_TIME_MS_KEY, true);
-        verifyChunkAccountAndContainer(blobId, stitchedBlobProperties);
-
-        chunksToStitch.add(new ChunkInfo(blobId, chunkSizeBytes, expirationTimeMs));
-      }
-      //the actual blob size for stitched blob is the sum of all the chunk sizes
-      restResponseChannel.setHeader(RestUtils.Headers.BLOB_SIZE, totalStitchedBlobSize);
-      return chunksToStitch;
-    }
-
-    /**
-     * Check that the account and container IDs encoded in a chunk's blob ID matches those in the properties for the
-     * stitched blob.
-     * @param chunkBlobId the blob ID for the chunk.
-     * @param stitchedBlobProperties the {@link BlobProperties} for the stitched blob.
-     * @throws RestServiceException if the account or container ID does not match.
-     */
-    private void verifyChunkAccountAndContainer(String chunkBlobId, BlobProperties stitchedBlobProperties)
-        throws RestServiceException {
-      Pair<Short, Short> accountAndContainer;
-      try {
-        accountAndContainer = BlobId.getAccountAndContainerIds(chunkBlobId);
-      } catch (Exception e) {
-        throw new RestServiceException("Invalid blob ID in signed chunk ID", RestServiceErrorCode.BadRequest);
-      }
-      if (stitchedBlobProperties.getAccountId() != accountAndContainer.getFirst()
-          || stitchedBlobProperties.getContainerId() != accountAndContainer.getSecond()) {
-        throw new RestServiceException("Account and container for chunk: (" + accountAndContainer.getFirst() + ", "
-            + accountAndContainer.getSecond() + ") does not match account and container for stitched blob: ("
-            + stitchedBlobProperties.getAccountId() + ", " + stitchedBlobProperties.getContainerId() + ")",
+    List<ChunkInfo> chunksToStitch = new ArrayList<>(signedChunkIds.size());
+    String expectedSession = null;
+    long totalStitchedBlobSize = 0;
+    for (String signedChunkId : signedChunkIds) {
+      signedChunkId =
+          RequestPath.parse(signedChunkId, Collections.emptyMap(), frontendConfig.pathPrefixesToRemove, clusterName)
+              .getOperationOrBlobId(false);
+      if (!idSigningService.isIdSigned(signedChunkId)) {
+        throw new RestServiceException("All chunks IDs must be signed: " + signedChunkId,
             RestServiceErrorCode.BadRequest);
       }
+      Pair<String, Map<String, String>> idAndMetadata = idSigningService.parseSignedId(signedChunkId);
+      String blobId = idAndMetadata.getFirst();
+      Map<String, String> metadata = idAndMetadata.getSecond();
+
+      expectedSession = RestUtils.verifyChunkUploadSession(metadata, expectedSession);
+      @SuppressWarnings("ConstantConditions")
+      long chunkSizeBytes = RestUtils.getLongHeader(metadata, RestUtils.Headers.BLOB_SIZE, true);
+
+      totalStitchedBlobSize += chunkSizeBytes;
+      // Expiration time is sent to the router, but not verified in this handler. The router is responsible for making
+      // checks related to internal ambry requirements, like making sure that the chunks do not expire before the
+      // metadata blob.
+      @SuppressWarnings("ConstantConditions")
+      long expirationTimeMs = RestUtils.getLongHeader(metadata, EXPIRATION_TIME_MS_KEY, true);
+      verifyChunkAccountAndContainer(blobId, stitchedBlobProperties);
+
+      chunksToStitch.add(new ChunkInfo(blobId, chunkSizeBytes, expirationTimeMs));
+    }
+    //the actual blob size for stitched blob is the sum of all the chunk sizes
+    restResponseChannel.setHeader(RestUtils.Headers.BLOB_SIZE, totalStitchedBlobSize);
+    return chunksToStitch;
+  }
+
+  private void verifyChunkAccountAndContainer(String chunkBlobId, BlobProperties stitchedBlobProperties)
+      throws RestServiceException {
+    Pair<Short, Short> accountAndContainer;
+    try {
+      accountAndContainer = BlobId.getAccountAndContainerIds(chunkBlobId);
+    } catch (Exception e) {
+      throw new RestServiceException("Invalid blob ID in signed chunk ID", RestServiceErrorCode.BadRequest);
+    }
+    if (stitchedBlobProperties.getAccountId() != accountAndContainer.getFirst()
+        || stitchedBlobProperties.getContainerId() != accountAndContainer.getSecond()) {
+      throw new RestServiceException(
+          "Account and container for chunk: (" + accountAndContainer.getFirst() + ", " + accountAndContainer.getSecond()
+              + ") does not match account and container for stitched blob: (" + stitchedBlobProperties.getAccountId()
+              + ", " + stitchedBlobProperties.getContainerId() + ")", RestServiceErrorCode.BadRequest);
     }
   }
 }

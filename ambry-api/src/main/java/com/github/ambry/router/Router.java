@@ -150,9 +150,10 @@ public interface Router extends Closeable {
    * @return A future that would contain the BlobId eventually.
    */
   default CompletableFuture<String> stitchBlob(BlobProperties blobProperties, byte[] userMetadata,
-      List<ChunkInfo> chunksToStitch) {
+      List<ChunkInfo> chunksToStitch, QuotaChargeCallback quotaChargeCallback) {
     CompletableFuture<String> future = new CompletableFuture<>();
-    stitchBlob(blobProperties, userMetadata, chunksToStitch, CallbackUtils.fromCompletableFuture(future), null);
+    stitchBlob(blobProperties, userMetadata, chunksToStitch, CallbackUtils.fromCompletableFuture(future),
+        quotaChargeCallback);
     return future;
   }
 
@@ -167,9 +168,10 @@ public interface Router extends Closeable {
    * @return A future that would contain the BlobId eventually.
    */
   default CompletableFuture<String> putBlob(BlobProperties blobProperties, byte[] userMetadata,
-      ReadableStreamChannel channel, PutBlobOptions options) {
+      ReadableStreamChannel channel, PutBlobOptions options, QuotaChargeCallback quotaChargeCallback) {
     CompletableFuture<String> future = new CompletableFuture<>();
-    putBlob(blobProperties, userMetadata, channel, options, CallbackUtils.fromCompletableFuture(future), null);
+    putBlob(blobProperties, userMetadata, channel, options, CallbackUtils.fromCompletableFuture(future),
+        quotaChargeCallback);
     return future;
   }
 

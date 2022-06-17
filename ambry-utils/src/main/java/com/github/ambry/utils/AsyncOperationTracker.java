@@ -82,7 +82,7 @@ public class AsyncOperationTracker {
    */
   public static class Metrics {
     private final String operationType;
-    private final Histogram operationTimeInMs;
+    public final Histogram operationTimeInMs;
     private final Histogram callbackProcessingTimeInMs;
     private final Counter callbackProcessingError;
 
