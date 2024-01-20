@@ -24,6 +24,8 @@ import com.github.ambry.config.StoreConfig;
 import com.github.ambry.utils.Throttler;
 import com.github.ambry.utils.Time;
 import com.github.ambry.utils.Utils;
+import com.google.inject.Inject;
+import com.google.inject.assistedinject.Assisted;
 import java.io.File;
 import java.io.IOException;
 import java.nio.ByteBuffer;
@@ -111,11 +113,13 @@ public class DiskManager {
    * @param time the {@link Time} instance to use.
    * @param accountService the {@link AccountService} instance to use.
    */
-  DiskManager(DiskId disk, List<ReplicaId> replicas, StoreConfig storeConfig, DiskManagerConfig diskManagerConfig,
-      ScheduledExecutorService scheduler, StorageManagerMetrics metrics, StoreMetrics storeMainMetrics,
-      StoreMetrics storeUnderCompactionMetrics, StoreKeyFactory keyFactory, MessageStoreRecovery recovery,
-      MessageStoreHardDelete hardDelete, List<ReplicaStatusDelegate> replicaStatusDelegates,
-      Set<String> stoppedReplicas, Time time, AccountService accountService) {
+  @Inject
+  DiskManager(@Assisted DiskId disk, @Assisted List<ReplicaId> replicas, StoreConfig storeConfig,
+      DiskManagerConfig diskManagerConfig, ScheduledExecutorService scheduler, StorageManagerMetrics metrics,
+      StoreMetrics storeMainMetrics, StoreMetrics storeUnderCompactionMetrics, StoreKeyFactory keyFactory,
+      MessageStoreRecovery recovery, MessageStoreHardDelete hardDelete,
+      List<ReplicaStatusDelegate> replicaStatusDelegates, @Assisted Set<String> stoppedReplicas, Time time,
+      AccountService accountService) {
     this.disk = disk;
     this.storeConfig = storeConfig;
     this.diskManagerConfig = diskManagerConfig;
@@ -139,10 +143,10 @@ public class DiskManager {
     this.replicaStatusDelegates = replicaStatusDelegates;
     this.stoppedReplicas = stoppedReplicas;
     expectedDirs.add(reserveFileDir.getAbsolutePath());
+    DiskMetrics diskMetrics = new DiskMetrics(storeMainMetrics.getRegistry(), disk.getMountPath(),
+        storeConfig.storeDiskIoReservoirTimeWindowMs);
     for (ReplicaId replica : replicas) {
       if (disk.equals(replica.getDiskId())) {
-        DiskMetrics diskMetrics = new DiskMetrics(storeMainMetrics.getRegistry(), disk.getMountPath(),
-            storeConfig.storeDiskIoReservoirTimeWindowMs);
         BlobStore store =
             new BlobStore(replica, storeConfig, scheduler, longLivedTaskScheduler, diskIOScheduler, diskSpaceAllocator,
                 storeMainMetrics, storeUnderCompactionMetrics, keyFactory, recovery, hardDelete, replicaStatusDelegates,

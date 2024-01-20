@@ -329,6 +329,8 @@ project(':ambry-server') {
                 project(':ambry-mysql')
         compile "io.dropwizard.metrics:metrics-core:$metricsVersion"
         compile "io.dropwizard.metrics:metrics-jmx:$metricsVersion"
+        compile "com.google.inject:guice:$guiceVersion"
+        compile "com.google.inject.extensions:guice-assistedinject:$guiceVersion"
         runtimeOnly "org.apache.logging.log4j:log4j-core:$log4jVersion"
         runtimeOnly "org.apache.logging.log4j:log4j-api:$log4jVersion"
         runtimeOnly "org.apache.logging.log4j:log4j-slf4j-impl:$log4jVersion"
@@ -350,6 +352,8 @@ project(':ambry-store') {
                 project(':ambry-account'),
                 project(':ambry-messageformat')
         compile "net.smacke:jaydio:$jaydioVersion"
+        compile "com.google.inject:guice:$guiceVersion"
+        compile "com.google.inject.extensions:guice-assistedinject:$guiceVersion"
         testCompile project(':ambry-clustermap')
         testCompile project(':ambry-test-utils')
         testCompile project(path: ':ambry-clustermap', configuration: 'testArchives')

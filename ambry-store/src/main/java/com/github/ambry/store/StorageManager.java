@@ -36,6 +36,7 @@ import com.github.ambry.server.ServerErrorCode;
 import com.github.ambry.server.StoreManager;
 import com.github.ambry.utils.Time;
 import com.github.ambry.utils.Utils;
+import com.google.inject.Inject;
 import java.io.File;
 import java.io.IOException;
 import java.util.ArrayList;
@@ -86,6 +87,7 @@ public class StorageManager implements StoreManager {
   private final Set<String> unexpectedDirs = new HashSet<>();
   private static final Logger logger = LoggerFactory.getLogger(StorageManager.class);
   private final AccountService accountService;
+  private final DiskManagerFactory diskManagerFactory;
   private DiskFailureHandler diskFailureHandler;
 
   /**
@@ -106,10 +108,12 @@ public class StorageManager implements StoreManager {
    * @param recovery the {@link MessageStoreRecovery} instance to use.
    * @param accountService the {@link AccountService} instance to use.
    */
+  @Inject
   public StorageManager(StoreConfig storeConfig, DiskManagerConfig diskManagerConfig,
       ScheduledExecutorService scheduler, MetricRegistry registry, StoreKeyFactory keyFactory, ClusterMap clusterMap,
       DataNodeId dataNodeId, MessageStoreHardDelete hardDelete, List<ClusterParticipant> clusterParticipants, Time time,
-      MessageStoreRecovery recovery, AccountService accountService) throws StoreException {
+      MessageStoreRecovery recovery, AccountService accountService, DiskManagerFactory diskManagerFactory)
+      throws StoreException {
     verifyConfigs(storeConfig, diskManagerConfig);
     this.storeConfig = storeConfig;
     this.diskManagerConfig = diskManagerConfig;
@@ -121,6 +125,7 @@ public class StorageManager implements StoreManager {
     this.accountService = accountService;
     this.clusterMap = clusterMap;
     this.clusterParticipants = clusterParticipants;
+    this.diskManagerFactory = diskManagerFactory;
     // The first participant (if there are multiple) in clusterParticipants list is considered primary participant by default.
     // Only primary participant should take actions in storage manager when state transition is invoked by Helix controller.
     primaryClusterParticipant =
@@ -150,10 +155,7 @@ public class StorageManager implements StoreManager {
     for (Map.Entry<DiskId, List<ReplicaId>> entry : diskToReplicaMap.entrySet()) {
       DiskId disk = entry.getKey();
       List<ReplicaId> replicasForDisk = entry.getValue();
-      DiskManager diskManager =
-          new DiskManager(disk, replicasForDisk, storeConfig, diskManagerConfig, scheduler, metrics, storeMainMetrics,
-              storeUnderCompactionMetrics, keyFactory, recovery, hardDelete, replicaStatusDelegates, stoppedReplicas,
-              time, accountService);
+      DiskManager diskManager = diskManagerFactory.create(disk, replicasForDisk, stoppedReplicas);
       diskToDiskManager.put(disk, diskManager);
       for (ReplicaId replica : replicasForDisk) {
         partitionToDiskManager.put(replica.getPartitionId(), diskManager);
@@ -186,6 +188,7 @@ public class StorageManager implements StoreManager {
    * Start the {@link DiskManager}s for all disks on this node.
    * @throws InterruptedException
    */
+  @Override
   public void start() throws InterruptedException, StoreException {
     long startTimeMs = time.milliseconds();
     try {
@@ -394,10 +397,7 @@ public class StorageManager implements StoreManager {
 
   DiskManager addDisk(DiskId diskId) {
     return diskToDiskManager.computeIfAbsent(diskId, disk -> {
-      DiskManager newDiskManager =
-          new DiskManager(disk, Collections.emptyList(), storeConfig, diskManagerConfig, scheduler, metrics,
-              storeMainMetrics, storeUnderCompactionMetrics, keyFactory, recovery, hardDelete, replicaStatusDelegates,
-              stoppedReplicas, time, accountService);
+      DiskManager newDiskManager = diskManagerFactory.create(disk, Collections.emptyList(), stoppedReplicas);
       logger.info("Creating new DiskManager on {} for new added store", diskId.getMountPath());
       try {
         newDiskManager.start(

@@ -27,6 +27,8 @@ import java.util.List;
  */
 public interface StoreManager {
 
+  void start() throws Exception;
+
   /**
    * Add a new BlobStore with given {@link ReplicaId}.
    * @param replica the {@link ReplicaId} of the {@link Store} which would be added.

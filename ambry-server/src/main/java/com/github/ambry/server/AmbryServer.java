@@ -17,7 +17,6 @@ import com.codahale.metrics.MetricRegistry;
 import com.codahale.metrics.jmx.JmxReporter;
 import com.github.ambry.account.AccountService;
 import com.github.ambry.account.AccountServiceCallback;
-import com.github.ambry.account.AccountServiceFactory;
 import com.github.ambry.accountstats.AccountStatsMySqlStore;
 import com.github.ambry.accountstats.AccountStatsMySqlStoreFactory;
 import com.github.ambry.clustermap.ClusterAgentsFactory;
@@ -32,21 +31,11 @@ import com.github.ambry.commons.NettyInternalMetrics;
 import com.github.ambry.commons.NettySslHttp2Factory;
 import com.github.ambry.commons.SSLFactory;
 import com.github.ambry.commons.ServerMetrics;
-import com.github.ambry.config.CloudConfig;
-import com.github.ambry.config.ClusterMapConfig;
-import com.github.ambry.config.ConnectionPoolConfig;
-import com.github.ambry.config.DiskManagerConfig;
 import com.github.ambry.config.Http2ClientConfig;
 import com.github.ambry.config.NettyConfig;
 import com.github.ambry.config.NetworkConfig;
-import com.github.ambry.config.ReplicationConfig;
-import com.github.ambry.config.SSLConfig;
 import com.github.ambry.config.ServerConfig;
-import com.github.ambry.config.StatsManagerConfig;
-import com.github.ambry.config.StoreConfig;
 import com.github.ambry.config.VerifiableProperties;
-import com.github.ambry.messageformat.BlobStoreHardDelete;
-import com.github.ambry.messageformat.BlobStoreRecovery;
 import com.github.ambry.network.BlockingChannelConnectionPool;
 import com.github.ambry.network.ConnectionPool;
 import com.github.ambry.network.LocalNetworkClientFactory;
@@ -80,12 +69,13 @@ import com.github.ambry.rest.ServerSecurityServiceFactory;
 import com.github.ambry.rest.StorageServerNettyFactory;
 import com.github.ambry.server.storagestats.AggregatedAccountStorageStats;
 import com.github.ambry.store.MessageInfo;
-import com.github.ambry.store.StorageManager;
 import com.github.ambry.store.StoreKeyConverterFactory;
 import com.github.ambry.store.StoreKeyFactory;
 import com.github.ambry.utils.SystemTime;
 import com.github.ambry.utils.Time;
 import com.github.ambry.utils.Utils;
+import com.google.inject.Guice;
+import com.google.inject.Injector;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.HashSet;
@@ -113,7 +103,7 @@ public class AmbryServer {
   private AmbryRequests requests = null;
   private RequestHandlerPool requestHandlerPool = null;
   private ScheduledExecutorService scheduler = null;
-  private StorageManager storageManager = null;
+  private StoreManager storageManager = null;
   private StatsManager statsManager = null;
   private ReplicationManager replicationManager = null;
   private CloudToStoreReplicationManager cloudToStoreReplicationManager = null;
@@ -204,19 +194,12 @@ public class AmbryServer {
       reporter = reporterFactory != null ? reporterFactory.apply(registry) : JmxReporter.forRegistry(registry).build();
       reporter.start();
 
-      logger.info("creating configs");
-      NetworkConfig networkConfig = new NetworkConfig(properties);
-      StoreConfig storeConfig = new StoreConfig(properties);
-      DiskManagerConfig diskManagerConfig = new DiskManagerConfig(properties);
-      ServerConfig serverConfig = new ServerConfig(properties);
-      ReplicationConfig replicationConfig = new ReplicationConfig(properties);
-      ConnectionPoolConfig connectionPoolConfig = new ConnectionPoolConfig(properties);
-      SSLConfig sslConfig = new SSLConfig(properties);
-      ClusterMapConfig clusterMapConfig = new ClusterMapConfig(properties);
-      StatsManagerConfig statsConfig = new StatsManagerConfig(properties);
-      CloudConfig cloudConfig = new CloudConfig(properties);
-      // verify the configs
-      properties.verify();
+      Injector injector =
+          Guice.createInjector(new ConfigurationModule(properties), new ClusterModule(clusterAgentsFactory));
+      AccountService accountService = injector.getInstance(AccountService.class);
+      storageManager = injector.getInstance(StoreManager.class);
+
+      NetworkConfig networkConfig = injector.getInstance(NetworkConfig.class);
 
       scheduler = Utils.newScheduler(serverConfig.serverSchedulerNumOfthreads, false);
       // if there are more than one participants on local node, we create a consistency checker to monitor and alert any
@@ -237,16 +220,9 @@ public class AmbryServer {
             + "is not present in the clustermap. Failing to start the datanode");
       }
 
-      AccountServiceFactory accountServiceFactory =
-          Utils.getObj(serverConfig.serverAccountServiceFactory, properties, registry);
-      AccountService accountService = accountServiceFactory.getAccountService();
-
       StoreKeyFactory storeKeyFactory = Utils.getObj(storeConfig.storeKeyFactory, clusterMap);
       // In most cases, there should be only one participant in the clusterParticipants list. If there are more than one
       // and some components require sole participant, the first one in the list will be primary participant.
-      storageManager =
-          new StorageManager(storeConfig, diskManagerConfig, scheduler, registry, storeKeyFactory, clusterMap, nodeId,
-              new BlobStoreHardDelete(), clusterParticipants, time, new BlobStoreRecovery(), accountService);
       storageManager.start();
 
       SSLFactory sslHttp2Factory = new NettySslHttp2Factory(sslConfig);
