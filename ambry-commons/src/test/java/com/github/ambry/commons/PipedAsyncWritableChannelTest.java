@@ -19,6 +19,8 @@ import com.github.ambry.router.AsyncWritableChannel;
 import com.github.ambry.router.ReadableStreamChannel;
 import com.github.ambry.utils.NettyByteBufLeakHelper;
 import com.github.ambry.utils.Utils;
+import io.netty.buffer.ByteBuf;
+import io.netty.buffer.PooledByteBufAllocator;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.channels.ClosedChannelException;
@@ -28,6 +30,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import org.junit.After;
+import org.junit.Assert;
 import org.junit.Before;
 import org.junit.Test;
 
@@ -170,6 +173,30 @@ public class PipedAsyncWritableChannelTest {
         throw new RuntimeException(e);
       }
     });
+  }
+
+  @Test
+  public void testWholeProcess() throws Exception {
+    ByteBuf byteBuf = PooledByteBufAllocator.DEFAULT.heapBuffer(1024);
+    byteBuf.writeBytes(fillRandomBytes(new byte[1024]));
+    byteBuf.retain(); // retain before it goes to readable stream channel
+    try {
+      PipedAsyncWritableChannel pipedAsyncWritableChannel =
+          new PipedAsyncWritableChannel(new ByteBufReadableStreamChannel(byteBuf), false);
+      ReadableStreamChannel primaryReadableStreamChannel = pipedAsyncWritableChannel.getPrimaryReadableStreamChannel();
+      ByteBufferAsyncWritableChannel writableChannel = new ByteBufferAsyncWritableChannel();
+      primaryReadableStreamChannel.readInto(writableChannel, null);
+      ByteBuf obtained = writableChannel.getNextByteBuf();
+      // Make sure this is the same as original byte array
+      obtained.retain();
+      writableChannel.resolveOldestChunk(null);
+      for (int i = 0; i < 1024; i++) {
+        Assert.assertEquals(byteBuf.getByte(i), obtained.getByte(i));
+      }
+      obtained.release();
+    } finally {
+      byteBuf.release();
+    }
   }
 
   /**
