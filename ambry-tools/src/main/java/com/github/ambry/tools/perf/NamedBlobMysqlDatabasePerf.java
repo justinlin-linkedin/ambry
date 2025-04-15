@@ -31,6 +31,7 @@ import com.github.ambry.mysql.MySqlUtils;
 import com.github.ambry.named.MySqlNamedBlobDbFactory;
 import com.github.ambry.named.NamedBlobDb;
 import com.github.ambry.named.NamedBlobRecord;
+import com.github.ambry.named.PutResult;
 import com.github.ambry.protocol.NamedBlobState;
 import com.github.ambry.tools.util.ToolUtils;
 import com.github.ambry.utils.SystemTime;
@@ -46,6 +47,7 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Properties;
 import java.util.Random;
+import java.util.UUID;
 import java.util.concurrent.Future;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ThreadLocalRandom;
@@ -78,6 +80,7 @@ import org.json.JSONArray;
  *  >      --parallelism 10 // number of connections to create
  *  >      --target_row 10  // number of millions of rows to create before performance test
  *  >      --include_list false // true of false to include list operations in the performance test
+ *  >      --enable_hard_delete true // true of false to enable hard delete. A soft delete doesn't delete rows from table
  *
  *  Or you can provide a property file to include all the arguments in the above command, for example:
  *  > cat named_blob.props
@@ -116,6 +119,7 @@ public class NamedBlobMysqlDatabasePerf {
   public static final String PARALLELISM = "parallelism";
   public static final String TARGET_ROWS = "target_rows";
   public static final String INCLUDE_LIST = "include_list";
+  public static final String ENABLE_HARD_DELETE = "enable_hard_delete";
 
   public static void main(String[] args) throws Exception {
     OptionParser parser = new OptionParser();
@@ -144,18 +148,23 @@ public class NamedBlobMysqlDatabasePerf {
     ArgumentAcceptingOptionSpec<String> dbHostOpt =
         parser.accepts(DB_HOST, "Database host").withRequiredArg().describedAs("db_host").ofType(String.class);
 
-    ArgumentAcceptingOptionSpec<Integer> parallelismOpt = parser.accepts(PARALLELISM, "Number of thread to execute sql statement")
-        .withRequiredArg()
-        .describedAs("parallelism")
-        .ofType(Integer.class);
+    ArgumentAcceptingOptionSpec<Integer> parallelismOpt =
+        parser.accepts(PARALLELISM, "Number of thread to execute sql statement")
+            .withRequiredArg()
+            .describedAs("parallelism")
+            .ofType(Integer.class);
 
     ArgumentAcceptingOptionSpec<Integer> targetMRowsOpt = parser.accepts(TARGET_ROWS,
-            "Number of rows to insert so the total database rows would reach this target." + "Notice that this target is in in millions. If the value is 1, this command would make sure database would have 1 million rows.")
+            "Number of rows to insert so the total database rows would reach this target."
+                + "Notice that this target is in in millions. If the value is 1, this command would make sure database would have 1 million rows.")
         .withRequiredArg()
         .describedAs("target_rows")
         .ofType(Integer.class);
 
-    OptionSpec<Void> includeListTestOpt = parser.accepts(INCLUDE_LIST, "Including list operation in the performance tests.");
+    OptionSpec<Void> includeListTestOpt =
+        parser.accepts(INCLUDE_LIST, "Including list operation in the performance tests.");
+    OptionSpec<Void> enabledHarDeleteOpt =
+        parser.accepts(ENABLE_HARD_DELETE, "Enable hard delete to actually delete rows from table.");
 
     OptionSet options = parser.parse(args);
     Properties props = new Properties();
@@ -191,11 +200,20 @@ public class NamedBlobMysqlDatabasePerf {
     if (!props.containsKey(INCLUDE_LIST)) {
       props.setProperty(INCLUDE_LIST, "false");
     }
+    if (options.has(enabledHarDeleteOpt)) {
+      props.setProperty(ENABLE_HARD_DELETE, "true");
+    }
+    if (!props.containsKey(ENABLE_HARD_DELETE)) {
+      props.setProperty(ENABLE_HARD_DELETE, "false");
+    }
 
-    List<String> requiredArguments = Arrays.asList(DB_USERNAME, DB_DATACENTER, DB_NAME, DB_HOST, PARALLELISM, TARGET_ROWS, INCLUDE_LIST);
+    List<String> requiredArguments =
+        Arrays.asList(DB_USERNAME, DB_DATACENTER, DB_NAME, DB_HOST, PARALLELISM, TARGET_ROWS, INCLUDE_LIST,
+            ENABLE_HARD_DELETE);
     for (String requiredArgument : requiredArguments) {
       if (!props.containsKey(requiredArgument)) {
-        System.err.println("Missing " + requiredArgument + "! Please provide it through property file or the command line argument");
+        System.err.println(
+            "Missing " + requiredArgument + "! Please provide it through property file or the command line argument");
         parser.printHelpOn(System.err);
         System.exit(1);
       }
@@ -203,21 +221,25 @@ public class NamedBlobMysqlDatabasePerf {
 
     // Now ask for password if it's not provided in the propFile
     if (!props.containsKey(DB_PASSWORD)) {
-      String password = ToolUtils.passwordInput("Please input database password for user " + props.getProperty(DB_USERNAME) + ": ");
+      String password =
+          ToolUtils.passwordInput("Please input database password for user " + props.getProperty(DB_USERNAME) + ": ");
       props.setProperty(DB_PASSWORD, password);
     }
 
     // Now create a mysql named blob data accessor
     Properties newProperties = new Properties();
-    String dbUrl = "jdbc:mysql://" + props.getProperty(DB_HOST) + "/" + props.getProperty(DB_NAME) + "?serverTimezone=UTC";
+    String dbUrl =
+        "jdbc:mysql://" + props.getProperty(DB_HOST) + "/" + props.getProperty(DB_NAME) + "?serverTimezone=UTC";
     MySqlUtils.DbEndpoint dbEndpoint =
-        new MySqlUtils.DbEndpoint(dbUrl, props.getProperty(DB_DATACENTER), true, props.getProperty(DB_USERNAME), props.getProperty(DB_PASSWORD));
+        new MySqlUtils.DbEndpoint(dbUrl, props.getProperty(DB_DATACENTER), true, props.getProperty(DB_USERNAME),
+            props.getProperty(DB_PASSWORD));
     JSONArray jsonArray = new JSONArray();
     jsonArray.put(dbEndpoint.toJson());
     System.out.println("DB_INFO: " + jsonArray);
     newProperties.setProperty(MySqlNamedBlobDbConfig.DB_INFO, jsonArray.toString());
-    newProperties.setProperty(MySqlNamedBlobDbConfig.DB_RELY_ON_NEW_TABLE, "true");
-    newProperties.setProperty(MySqlNamedBlobDbConfig.LOCAL_POOL_SIZE, String.valueOf(2 * Integer.valueOf(props.getProperty(PARALLELISM))));
+    newProperties.setProperty(MySqlNamedBlobDbConfig.LOCAL_POOL_SIZE,
+        String.valueOf(2 * Integer.valueOf(props.getProperty(PARALLELISM))));
+    newProperties.setProperty(MySqlNamedBlobDbConfig.ENABLE_HARD_DELETE, props.getProperty(ENABLE_HARD_DELETE));
     newProperties.setProperty(ClusterMapConfig.CLUSTERMAP_DATACENTER_NAME, props.getProperty(DB_DATACENTER));
 
     int numThreads = Integer.valueOf(props.getProperty(PARALLELISM));
@@ -226,7 +248,8 @@ public class NamedBlobMysqlDatabasePerf {
     // Mock an account service
     AccountService accountService = createInMemoryAccountService();
     MySqlNamedBlobDbFactory factory =
-        new MySqlNamedBlobDbFactory(new VerifiableProperties(newProperties), registry, accountService, SystemTime.getInstance());
+        new MySqlNamedBlobDbFactory(new VerifiableProperties(newProperties), registry, accountService,
+            SystemTime.getInstance());
     DataSource dataSource = factory.buildDataSource(dbEndpoint);
     NamedBlobDb namedBlobDb = factory.getNamedBlobDb();
 
@@ -267,9 +290,11 @@ public class NamedBlobMysqlDatabasePerf {
       for (int j = 0; j < numContainer; j++) {
         short containerId = (short) (j + 2);
         String containerName = String.format(CONTAINER_NAME_FORMAT, containerId);
-        containers.add(new ContainerBuilder(containerId, containerName, Container.ContainerStatus.ACTIVE, "", accountId).build());
+        containers.add(
+            new ContainerBuilder(containerId, containerName, Container.ContainerStatus.ACTIVE, "", accountId).build());
       }
-      Account account = new AccountBuilder(accountId, accountName, Account.AccountStatus.ACTIVE).containers(containers).build();
+      Account account =
+          new AccountBuilder(accountId, accountName, Account.AccountStatus.ACTIVE).containers(containers).build();
       accounts.add(account);
     }
     // Now add the special account
@@ -395,6 +420,22 @@ public class NamedBlobMysqlDatabasePerf {
     return record;
   }
 
+  private static NamedBlobRecord generateRandomNamedBlobRecordForFlink(Random random, AccountService accountService,
+      List<Account> allAccounts) {
+    Account account = allAccounts.get(random.nextInt(allAccounts.size()));
+    List<Container> containers = new ArrayList<>(account.getAllContainers());
+    Container container = containers.get(random.nextInt(containers.size()));
+    String blobName =
+        String.format("checkpoints/$s/chk-900/%s", TestUtils.getRandomString(32), UUID.randomUUID().toString());
+    BlobId blobId =
+        new BlobId(BlobId.BLOB_ID_V6, BlobId.BlobIdType.NATIVE, (byte) 1, account.getId(), container.getId(),
+            PARTITION_ID, false, BlobId.BlobDataType.DATACHUNK);
+    long expirationTime = Utils.addSecondsToEpochTime(System.currentTimeMillis() / 1000, TimeUnit.DAYS.toSeconds(2));
+    NamedBlobRecord record =
+        new NamedBlobRecord(account.getName(), container.getName(), blobName, blobId.toString(), expirationTime);
+    return record;
+  }
+
   /**
    * Worker class to insert rows into database.
    */
@@ -508,51 +549,32 @@ public class NamedBlobMysqlDatabasePerf {
     public void run() {
       ThreadLocalRandom random = ThreadLocalRandom.current();
       try {
-        for (long l = 0; l < numberOfPuts; l++) {
+        for (long l = 1; l <= numberOfPuts; l++) {
           NamedBlobRecord record = generateRandomNamedBlobRecord(random, accountService, allAccounts);
-          namedBlobDb.put(record, NamedBlobState.IN_PROGRESS, true).get();
-          allRecords.add(record);
-        }
-        System.out.println("PerformanceTestWorker " + id + " finishes writing " + numberOfPuts + " records");
-
-        for (NamedBlobRecord record : allRecords) {
+          try {
+            namedBlobDb.get(record.getAccountName(), record.getContainerName(), record.getBlobName()).get();
+          } catch (Exception e) {
+            // expected NOT_FOUND failure
+          }
+          try {
+            namedBlobDb.get(record.getAccountName(), record.getContainerName(), record.getBlobName() + "/").get();
+          } catch (Exception e) {
+            // expected NOT_FOUND failure
+          }
+          PutResult putResult = namedBlobDb.put(record, NamedBlobState.IN_PROGRESS, true).get();
+          // Get the updated version
+          record = putResult.getInsertedRecord();
           namedBlobDb.updateBlobTtlAndStateToReady(record).get();
-        }
-        System.out.println("PerformanceTestWorker " + id + " finishes updating " + numberOfPuts + " records");
-
-        for (NamedBlobRecord record : allRecords) {
+          // Get blob again
           namedBlobDb.get(record.getAccountName(), record.getContainerName(), record.getBlobName()).get();
-        }
-        System.out.println("PerformanceTestWorker " + id + " finishes reading " + numberOfPuts + " records");
-
-        if (includeList) {
-          int numberOfList = 0;
-          for (NamedBlobRecord record : allRecords) {
-            if (!record.getAccountName().equals(String.format(ACCOUNT_NAME_FORMAT, HUGE_LIST_ACCOUNT_ID))) {
-              namedBlobDb.list(record.getAccountName(), record.getContainerName(), "A", null, null).get();
-              numberOfList++;
-              if (numberOfList == 100) {
-                break;
-              }
-            }
-          }
-          System.out.println("PerformanceTestWorker " + id + " finishes listing for records");
-
-          String accountName = String.format(ACCOUNT_NAME_FORMAT, HUGE_LIST_ACCOUNT_ID);
-          String containerName = String.format(CONTAINER_NAME_FORMAT, HUGE_LIST_CONTAINER_ID);
-          String token = null;
-          for (int i = 0; i < 100; i++) {
-            token = namedBlobDb.list(accountName, containerName, HUGE_LIST_COMMON_PREFIX, token, null)
-                .get()
-                .getNextPageToken();
-          }
-          System.out.println("PerformanceTestWorker " + id + " finishes listing for huge records");
-        }
-
-        for (NamedBlobRecord record : allRecords) {
+          // Now delete
+          namedBlobDb.get(record.getAccountName(), record.getContainerName(), record.getBlobName()).get();
           namedBlobDb.delete(record.getAccountName(), record.getContainerName(), record.getBlobName()).get();
+          if (l % 100 == 0) {
+            System.out.println("PerformanceTestWorker " + id + " finishes " + l + " records");
+          }
         }
-        System.out.println("PerformanceTestWorker " + id + " finishes deleting " + numberOfPuts + " records");
+        System.out.println("PerformanceTestWorker " + id + " finishes " + numberOfPuts + " records");
       } catch (Exception e) {
         System.out.println("PerformanceTestWorker " + id + " has som exception " + e);
       }
