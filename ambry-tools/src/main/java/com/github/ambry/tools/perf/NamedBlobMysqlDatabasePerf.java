@@ -426,7 +426,7 @@ public class NamedBlobMysqlDatabasePerf {
     List<Container> containers = new ArrayList<>(account.getAllContainers());
     Container container = containers.get(random.nextInt(containers.size()));
     String blobName =
-        String.format("checkpoints/$s/chk-900/%s", TestUtils.getRandomString(32), UUID.randomUUID().toString());
+        String.format("checkpoints/%s/chk-900/%s", TestUtils.getRandomString(32), UUID.randomUUID().toString());
     BlobId blobId =
         new BlobId(BlobId.BLOB_ID_V6, BlobId.BlobIdType.NATIVE, (byte) 1, account.getId(), container.getId(),
             PARTITION_ID, false, BlobId.BlobDataType.DATACHUNK);
@@ -550,7 +550,7 @@ public class NamedBlobMysqlDatabasePerf {
       ThreadLocalRandom random = ThreadLocalRandom.current();
       try {
         for (long l = 1; l <= numberOfPuts; l++) {
-          NamedBlobRecord record = generateRandomNamedBlobRecord(random, accountService, allAccounts);
+          NamedBlobRecord record = generateRandomNamedBlobRecordForFlink(random, accountService, allAccounts);
           try {
             namedBlobDb.get(record.getAccountName(), record.getContainerName(), record.getBlobName()).get();
           } catch (Exception e) {
