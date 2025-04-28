@@ -81,6 +81,7 @@ import org.json.JSONArray;
  *  >      --target_row 10  // number of millions of rows to create before performance test
  *  >      --include_list false // true of false to include list operations in the performance test
  *  >      --enable_hard_delete true // true of false to enable hard delete. A soft delete doesn't delete rows from table
+ *  >      --only_writes true // true of false to only do the writes
  *
  *  Or you can provide a property file to include all the arguments in the above command, for example:
  *  > cat named_blob.props
@@ -120,6 +121,7 @@ public class NamedBlobMysqlDatabasePerf {
   public static final String TARGET_ROWS = "target_rows";
   public static final String INCLUDE_LIST = "include_list";
   public static final String ENABLE_HARD_DELETE = "enable_hard_delete";
+  public static final String ONLY_WRITES = "only_writes";
 
   public static void main(String[] args) throws Exception {
     OptionParser parser = new OptionParser();
@@ -165,6 +167,8 @@ public class NamedBlobMysqlDatabasePerf {
         parser.accepts(INCLUDE_LIST, "Including list operation in the performance tests.");
     OptionSpec<Void> enabledHarDeleteOpt =
         parser.accepts(ENABLE_HARD_DELETE, "Enable hard delete to actually delete rows from table.");
+    OptionSpec<Void> onlyWritesOpt =
+        parser.accepts(ONLY_WRITES, "Only do the write (insert, update, delete) in the perf test.");
 
     OptionSet options = parser.parse(args);
     Properties props = new Properties();
@@ -206,10 +210,16 @@ public class NamedBlobMysqlDatabasePerf {
     if (!props.containsKey(ENABLE_HARD_DELETE)) {
       props.setProperty(ENABLE_HARD_DELETE, "false");
     }
+    if (options.has(onlyWritesOpt)) {
+      props.setProperty(ONLY_WRITES, "true");
+    }
+    if (!props.containsKey(ONLY_WRITES)) {
+      props.setProperty(ONLY_WRITES, "false");
+    }
 
     List<String> requiredArguments =
         Arrays.asList(DB_USERNAME, DB_DATACENTER, DB_NAME, DB_HOST, PARALLELISM, TARGET_ROWS, INCLUDE_LIST,
-            ENABLE_HARD_DELETE);
+            ENABLE_HARD_DELETE, ONLY_WRITES);
     for (String requiredArgument : requiredArguments) {
       if (!props.containsKey(requiredArgument)) {
         System.err.println(
@@ -267,7 +277,8 @@ public class NamedBlobMysqlDatabasePerf {
     // For performance testing, we are expecting each database query's average latency to be 2ms. So each worker can achieve
     // 500 QPS. We are trying to achieve 80K QPS for each query, which means we at least need 160 threads.
     boolean includeList = props.getProperty(INCLUDE_LIST).equals("true");
-    runPerformanceTest(registry, namedBlobDb, executor, accountService, numThreads, includeList);
+    boolean onlyWrites = props.getProperty(ONLY_WRITES).equals("true");
+    runPerformanceTest(registry, namedBlobDb, executor, accountService, numThreads, includeList, onlyWrites);
 
     Utils.shutDownExecutorService(executor, 10, TimeUnit.SECONDS);
     namedBlobDb.close();
@@ -492,7 +503,8 @@ public class NamedBlobMysqlDatabasePerf {
    * @throws Exception
    */
   private static void runPerformanceTest(MetricRegistry registry, NamedBlobDb namedBlobDb,
-      ScheduledExecutorService executor, AccountService accountService, int numThreads, boolean includeList)
+      ScheduledExecutorService executor, AccountService accountService, int numThreads, boolean includeList,
+      boolean onlyWrites)
       throws Exception {
     long numberOfPuts = 1000 * 1000; // 1 million inserts
     System.out.println("Running performance test, number of puts: " + numberOfPuts);
@@ -503,7 +515,8 @@ public class NamedBlobMysqlDatabasePerf {
       if (i == numThreads - 1) {
         num = numberOfPuts - i * numberOfInsertPerWorker;
       }
-      futures.add(executor.submit(new PerformanceTestWorker(i, namedBlobDb, accountService, num, includeList)));
+      futures.add(
+          executor.submit(new PerformanceTestWorker(i, namedBlobDb, accountService, num, includeList, onlyWrites)));
     }
     for (Future<?> future : futures) {
       future.get();
@@ -532,15 +545,17 @@ public class NamedBlobMysqlDatabasePerf {
     private final List<Account> allAccounts;
     private final long numberOfPuts;
     private final boolean includeList;
+    private final boolean onlyWrites;
     private final List<NamedBlobRecord> allRecords;
 
     public PerformanceTestWorker(int id, NamedBlobDb namedBlobDb, AccountService accountService, long numberOfPuts,
-        boolean includeList) {
+        boolean includeList, boolean onlyWrites) {
       this.id = id;
       this.namedBlobDb = namedBlobDb;
       this.accountService = accountService;
       this.numberOfPuts = numberOfPuts;
       this.includeList = includeList;
+      this.onlyWrites = onlyWrites;
       allAccounts = new ArrayList<>(accountService.getAllAccounts());
       allRecords = new ArrayList<>((int) numberOfPuts);
     }
@@ -551,24 +566,27 @@ public class NamedBlobMysqlDatabasePerf {
       try {
         for (long l = 1; l <= numberOfPuts; l++) {
           NamedBlobRecord record = generateRandomNamedBlobRecordForFlink(random, accountService, allAccounts);
-          try {
-            namedBlobDb.get(record.getAccountName(), record.getContainerName(), record.getBlobName()).get();
-          } catch (Exception e) {
-            // expected NOT_FOUND failure
-          }
-          try {
-            namedBlobDb.get(record.getAccountName(), record.getContainerName(), record.getBlobName() + "/").get();
-          } catch (Exception e) {
-            // expected NOT_FOUND failure
+          if (!onlyWrites) {
+            try {
+              namedBlobDb.get(record.getAccountName(), record.getContainerName(), record.getBlobName()).get();
+            } catch (Exception e) {
+              // expected NOT_FOUND failure
+            }
+            try {
+              namedBlobDb.get(record.getAccountName(), record.getContainerName(), record.getBlobName() + "/").get();
+            } catch (Exception e) {
+              // expected NOT_FOUND failure
+            }
           }
           PutResult putResult = namedBlobDb.put(record, NamedBlobState.IN_PROGRESS, true).get();
           // Get the updated version
           record = putResult.getInsertedRecord();
           namedBlobDb.updateBlobTtlAndStateToReady(record).get();
-          // Get blob again
-          namedBlobDb.get(record.getAccountName(), record.getContainerName(), record.getBlobName()).get();
+          if (!onlyWrites) {
+            // Get blob again
+            namedBlobDb.get(record.getAccountName(), record.getContainerName(), record.getBlobName()).get();
+          }
           // Now delete
-          namedBlobDb.get(record.getAccountName(), record.getContainerName(), record.getBlobName()).get();
           namedBlobDb.delete(record.getAccountName(), record.getContainerName(), record.getBlobName()).get();
           if (l % 100 == 0) {
             System.out.println("PerformanceTestWorker " + id + " finishes " + l + " records");
