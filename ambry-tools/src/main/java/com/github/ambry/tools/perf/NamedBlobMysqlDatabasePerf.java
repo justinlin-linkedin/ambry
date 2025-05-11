@@ -27,6 +27,7 @@ import com.github.ambry.commons.BlobId;
 import com.github.ambry.config.ClusterMapConfig;
 import com.github.ambry.config.MySqlNamedBlobDbConfig;
 import com.github.ambry.config.VerifiableProperties;
+import com.github.ambry.frontend.Page;
 import com.github.ambry.mysql.MySqlUtils;
 import com.github.ambry.named.MySqlNamedBlobDbFactory;
 import com.github.ambry.named.NamedBlobDb;
@@ -34,10 +35,10 @@ import com.github.ambry.named.NamedBlobRecord;
 import com.github.ambry.named.PutResult;
 import com.github.ambry.protocol.NamedBlobState;
 import com.github.ambry.tools.util.ToolUtils;
-import com.github.ambry.utils.SystemTime;
 import com.github.ambry.utils.TestUtils;
 import com.github.ambry.utils.Utils;
 import java.io.FileInputStream;
+import java.lang.reflect.Method;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
@@ -79,9 +80,10 @@ import org.json.JSONArray;
  *  >      --db_host database_host
  *  >      --parallelism 10 // number of connections to create
  *  >      --target_row 10  // number of millions of rows to create before performance test
- *  >      --include_list false // true of false to include list operations in the performance test
+ *  >      --num_operations 1000000 // number of operations to do in the perforamnce test
  *  >      --enable_hard_delete true // true of false to enable hard delete. A soft delete doesn't delete rows from table
- *  >      --only_writes true // true of false to only do the writes
+ *  >      --test_type CUSTOM // CUSTOM, LIST, READ_WRITE
+ *  >      --custom.only_writes true // true of false to only do the writes for custom perf test
  *
  *  Or you can provide a property file to include all the arguments in the above command, for example:
  *  > cat named_blob.props
@@ -92,18 +94,20 @@ import org.json.JSONArray;
  *  db_host=database_hostname
  *  parallelism=10
  *  target_rows=10
- *  include_list=false
+ *  num_operations=1000000
+ *  perf_test=list_test
  *  > java -cp "*" com.github.ambry.tools.perf.NamedBlobMysqlDatabasePerf --props named_blob.props
  */
 public class NamedBlobMysqlDatabasePerf {
-  public static final short HUGE_LIST_ACCOUNT_ID = 1024;
-  public static final short HUGE_LIST_CONTAINER_ID = 8;
-  public static final String HUGE_LIST_COMMON_PREFIX = "hugeListCommonPrefix/NamedBlobMysqlDatabasePerf-";
-  // 10% of the chance we would use this account id and container id for insert
-  public static final float PERCENTAGE_FOR_HUGE_LIST = 0.1f;
-
   public static final String ACCOUNT_NAME_FORMAT = "ACCOUNT_%d";
   public static final String CONTAINER_NAME_FORMAT = "CONTAINER_%d";
+
+  public static final short HUGE_LIST_ACCOUNT_ID = 1024;
+  public static final short HUGE_LIST_CONTAINER_ID = 8;
+  public static final String HUGE_LIST_ACCOUNT_NAME = String.format(ACCOUNT_NAME_FORMAT, HUGE_LIST_ACCOUNT_ID);
+  public static final String HUGE_LIST_CONTAINER_NAME = String.format(CONTAINER_NAME_FORMAT, HUGE_LIST_CONTAINER_ID);
+  public static final String HUGE_LIST_COMMON_PREFIX = "hugeListCommonPrefix/NamedBlobMysqlDatabasePerf-";
+  public static final String HUGE_LIST_TEMPLATE = "hugeListCommonPrefix/NamedBlobMysqlDatabasePerf-%s/%s";
 
   public static final int NUMBER_ACCOUNT = 100;
   public static final int NUMBER_CONTAINER = 10;
@@ -119,9 +123,53 @@ public class NamedBlobMysqlDatabasePerf {
   public static final String DB_PASSWORD = "db_password";
   public static final String PARALLELISM = "parallelism";
   public static final String TARGET_ROWS = "target_rows";
-  public static final String INCLUDE_LIST = "include_list";
   public static final String ENABLE_HARD_DELETE = "enable_hard_delete";
-  public static final String ONLY_WRITES = "only_writes";
+  public static final String NUM_OPERATIONS = "num_operations";
+  public static final String TEST_TYPE = "test_type";
+  public static final String ONLY_WRITES = "custom.only_writes";
+
+  public enum TestType {
+    READ_WRITE {
+      @Override
+      public Class<? extends PerformanceTestWorker> getWorkerClass() {
+        return ReadWritePerformanceTestWorker.class;
+      }
+    }, LIST {
+      @Override
+      public Class<? extends PerformanceTestWorker> getWorkerClass() {
+        return ListPerformanceTestWorker.class;
+      }
+    }, CUSTOM {
+      @Override
+      public Class<? extends PerformanceTestWorker> getWorkerClass() {
+        return CustomPerformanceTestWorker.class;
+      }
+    };
+
+    public long getExistingRows(DataSource dataSource) throws Exception {
+      Class<?> clazz = getWorkerClass();
+      Method method = clazz.getDeclaredMethod("getNumberOfExistingRows", DataSource.class);
+      Object object = method.invoke(null, dataSource);
+      if (object instanceof Long) {
+        return (Long) object;
+      } else {
+        throw new IllegalArgumentException("getNumberOfExistingRows should return a long");
+      }
+    }
+
+    public NamedBlobRecord generateNewNamedBlobRecord(Random random, List<Account> allAccounts) throws Exception {
+      Class<?> clazz = getWorkerClass();
+      Method method = clazz.getDeclaredMethod("generateNewNamedBlobRecord", Random.class, List.class);
+      Object object = method.invoke(null, random, allAccounts);
+      if (object instanceof NamedBlobRecord) {
+        return (NamedBlobRecord) object;
+      } else {
+        throw new IllegalArgumentException("generateNewNamedBlobRecord should return a NamedBlobRecord");
+      }
+    }
+
+    public abstract <T extends PerformanceTestWorker> Class<T> getWorkerClass();
+  }
 
   public static void main(String[] args) throws Exception {
     OptionParser parser = new OptionParser();
@@ -156,6 +204,15 @@ public class NamedBlobMysqlDatabasePerf {
             .describedAs("parallelism")
             .ofType(Integer.class);
 
+    ArgumentAcceptingOptionSpec<TestType> testTypeOpt =
+        parser.accepts(TEST_TYPE, "Perf test type").withRequiredArg().describedAs("test_type").ofType(TestType.class);
+
+    ArgumentAcceptingOptionSpec<Integer> numOperationsOpt =
+        parser.accepts(NUM_OPERATIONS, "Number of operations to run in the performance test")
+            .withRequiredArg()
+            .describedAs("num_operations")
+            .ofType(Integer.class);
+
     ArgumentAcceptingOptionSpec<Integer> targetMRowsOpt = parser.accepts(TARGET_ROWS,
             "Number of rows to insert so the total database rows would reach this target."
                 + "Notice that this target is in in millions. If the value is 1, this command would make sure database would have 1 million rows.")
@@ -163,8 +220,6 @@ public class NamedBlobMysqlDatabasePerf {
         .describedAs("target_rows")
         .ofType(Integer.class);
 
-    OptionSpec<Void> includeListTestOpt =
-        parser.accepts(INCLUDE_LIST, "Including list operation in the performance tests.");
     OptionSpec<Void> enabledHarDeleteOpt =
         parser.accepts(ENABLE_HARD_DELETE, "Enable hard delete to actually delete rows from table.");
     OptionSpec<Void> onlyWritesOpt =
@@ -180,6 +235,7 @@ public class NamedBlobMysqlDatabasePerf {
       }
       System.out.println("Getting properties: " + props.stringPropertyNames());
     }
+
     if (options.has(dbUsernameOpt)) {
       props.setProperty(DB_USERNAME, options.valueOf(dbUsernameOpt));
     }
@@ -195,14 +251,14 @@ public class NamedBlobMysqlDatabasePerf {
     if (options.has(parallelismOpt)) {
       props.setProperty(PARALLELISM, String.valueOf(options.valueOf(parallelismOpt)));
     }
-    if (options.has(targetMRowsOpt)) {
-      props.setProperty(TARGET_ROWS, String.valueOf(options.valueOf(targetMRowsOpt)));
+    if (options.has(testTypeOpt)) {
+      props.put(TEST_TYPE, options.valueOf(testTypeOpt));
     }
-    if (options.has(includeListTestOpt)) {
-      props.setProperty(INCLUDE_LIST, "true");
+    if (options.has(testTypeOpt)) {
+      props.put(TEST_TYPE, options.valueOf(testTypeOpt));
     }
-    if (!props.containsKey(INCLUDE_LIST)) {
-      props.setProperty(INCLUDE_LIST, "false");
+    if (options.has(numOperationsOpt)) {
+      props.setProperty(NUM_OPERATIONS, String.valueOf(options.valueOf(numOperationsOpt)));
     }
     if (options.has(enabledHarDeleteOpt)) {
       props.setProperty(ENABLE_HARD_DELETE, "true");
@@ -218,8 +274,8 @@ public class NamedBlobMysqlDatabasePerf {
     }
 
     List<String> requiredArguments =
-        Arrays.asList(DB_USERNAME, DB_DATACENTER, DB_NAME, DB_HOST, PARALLELISM, TARGET_ROWS, INCLUDE_LIST,
-            ENABLE_HARD_DELETE, ONLY_WRITES);
+        Arrays.asList(DB_USERNAME, DB_DATACENTER, DB_NAME, DB_HOST, PARALLELISM, TARGET_ROWS, TEST_TYPE, NUM_OPERATIONS,
+            ENABLE_HARD_DELETE);
     for (String requiredArgument : requiredArguments) {
       if (!props.containsKey(requiredArgument)) {
         System.err.println(
@@ -247,6 +303,8 @@ public class NamedBlobMysqlDatabasePerf {
     jsonArray.put(dbEndpoint.toJson());
     System.out.println("DB_INFO: " + jsonArray);
     newProperties.setProperty(MySqlNamedBlobDbConfig.DB_INFO, jsonArray.toString());
+    newProperties.setProperty(MySqlNamedBlobDbConfig.LIST_NAMED_BLOBS_SQL_OPTION,
+        String.valueOf(MySqlNamedBlobDbConfig.MAX_LIST_NAMED_BLOBS_SQL_OPTION));
     newProperties.setProperty(MySqlNamedBlobDbConfig.LOCAL_POOL_SIZE,
         String.valueOf(2 * Integer.valueOf(props.getProperty(PARALLELISM))));
     newProperties.setProperty(MySqlNamedBlobDbConfig.ENABLE_HARD_DELETE, props.getProperty(ENABLE_HARD_DELETE));
@@ -258,27 +316,13 @@ public class NamedBlobMysqlDatabasePerf {
     // Mock an account service
     AccountService accountService = createInMemoryAccountService();
     MySqlNamedBlobDbFactory factory =
-        new MySqlNamedBlobDbFactory(new VerifiableProperties(newProperties), registry, accountService,
-            SystemTime.getInstance());
+        new MySqlNamedBlobDbFactory(new VerifiableProperties(newProperties), registry, accountService);
     DataSource dataSource = factory.buildDataSource(dbEndpoint);
     NamedBlobDb namedBlobDb = factory.getNamedBlobDb();
+    TestType testType = (TestType) props.get(TEST_TYPE);
 
-    // First, fill the database with target number of rows
-    long targetRows = Long.valueOf(props.getProperty(TARGET_ROWS)) * 1000000L;
-    long existingRows = getNumberOfRowsInDatabase(dataSource);
-    if (existingRows >= targetRows) {
-      System.out.println("Existing number of rows: " + existingRows + ", more than target number of rows: " + targetRows
-          + ", skip filling database rows");
-    } else {
-      fillDatabase(registry, namedBlobDb, executor, accountService, existingRows, targetRows, numThreads);
-    }
-
-    // Then starting doing performance tests
-    // For performance testing, we are expecting each database query's average latency to be 2ms. So each worker can achieve
-    // 500 QPS. We are trying to achieve 80K QPS for each query, which means we at least need 160 threads.
-    boolean includeList = props.getProperty(INCLUDE_LIST).equals("true");
-    boolean onlyWrites = props.getProperty(ONLY_WRITES).equals("true");
-    runPerformanceTest(registry, namedBlobDb, executor, accountService, numThreads, includeList, onlyWrites);
+    prepareDatabaseForPerfTest(testType, registry, namedBlobDb, dataSource, executor, accountService, props);
+    runPerformanceTest(registry, namedBlobDb, testType, executor, accountService, numThreads, props);
 
     Utils.shutDownExecutorService(executor, 10, TimeUnit.SECONDS);
     namedBlobDb.close();
@@ -311,10 +355,10 @@ public class NamedBlobMysqlDatabasePerf {
     // Now add the special account
     //@formatter:off
     accounts.add(
-        new AccountBuilder(HUGE_LIST_ACCOUNT_ID, String.format(ACCOUNT_NAME_FORMAT, HUGE_LIST_ACCOUNT_ID), Account.AccountStatus.ACTIVE)
+        new AccountBuilder(HUGE_LIST_ACCOUNT_ID, HUGE_LIST_ACCOUNT_NAME, Account.AccountStatus.ACTIVE)
             .containers(
                 Collections.singletonList(
-                    new ContainerBuilder(HUGE_LIST_CONTAINER_ID, String.format(CONTAINER_NAME_FORMAT, HUGE_LIST_CONTAINER_ID), Container.ContainerStatus.ACTIVE, "", HUGE_LIST_ACCOUNT_ID)
+                    new ContainerBuilder(HUGE_LIST_CONTAINER_ID, HUGE_LIST_CONTAINER_NAME, Container.ContainerStatus.ACTIVE, "", HUGE_LIST_ACCOUNT_ID)
                         .build()))
             .build());
     //@formatter:on
@@ -323,39 +367,27 @@ public class NamedBlobMysqlDatabasePerf {
   }
 
   /**
-   * Get total number of rows of the target table.
-   * @param datasource Datasource to execute query on.
-   * @return Total number of rows
-   * @throws Exception
-   */
-  private static long getNumberOfRowsInDatabase(DataSource datasource) throws Exception {
-    String rowQuerySql = "SELECT COUNT(*) as total FROM " + TABLE_NAME;
-    long numberOfRows = 0;
-    try (Connection connection = datasource.getConnection()) {
-      try (PreparedStatement queryStatement = connection.prepareStatement(rowQuerySql)) {
-        try (ResultSet result = queryStatement.executeQuery()) {
-          while (result.next()) {
-            numberOfRows = result.getLong("total");
-          }
-        }
-      }
-    }
-    return numberOfRows;
-  }
-
-  /**
    * Fill database(table) with rows so we can reach the target number of rows.
    * @param registry The {@link MetricRegistry} object.
    * @param namedBlobDb The {@link NamedBlobDb} object.
    * @param executor The {@link ScheduledExecutorService} object.
    * @param accountService The {@link AccountService} object.
-   * @param existingRows The number of existing rows.
-   * @param targetRows The number of target rows.
-   * @param numThreads The number of threads for insert database rows.
+   * @param props The {@link Properties} object.
    * @throws Exception
    */
-  private static void fillDatabase(MetricRegistry registry, NamedBlobDb namedBlobDb, ScheduledExecutorService executor,
-      AccountService accountService, long existingRows, long targetRows, int numThreads) throws Exception {
+  private static void prepareDatabaseForPerfTest(TestType testType, MetricRegistry registry, NamedBlobDb namedBlobDb,
+      DataSource dataSource, ScheduledExecutorService executor, AccountService accountService, Properties props)
+      throws Exception {
+    // First, fill the database with target number of rows
+    long targetRows = Long.valueOf(props.getProperty(TARGET_ROWS)) * 1000000L;
+    long existingRows = testType.getExistingRows(dataSource);
+    if (existingRows >= targetRows) {
+      System.out.println("Existing number of rows: " + existingRows + ", more than target number of rows: " + targetRows
+          + ", skip filling database rows");
+      return;
+    }
+
+    int numThreads = Integer.valueOf(props.getProperty(PARALLELISM));
     long remainingRows = targetRows - existingRows;
     System.out.println("Existing number of rows: " + existingRows + ". Target number of rows: " + targetRows
         + ". Number of rows to insert: " + remainingRows);
@@ -367,7 +399,7 @@ public class NamedBlobMysqlDatabasePerf {
       if (i == numThreads - 1) {
         num = remainingRows - i * numberOfInsertPerWorker;
       }
-      futures.add(executor.submit(new RowFillWorker(i, namedBlobDb, accountService, num, trackingRow)));
+      futures.add(executor.submit(new RowFillWorker(i, namedBlobDb, testType, accountService, num, trackingRow)));
     }
     AtomicBoolean stop = new AtomicBoolean(false);
     executor.submit(() -> {
@@ -402,60 +434,14 @@ public class NamedBlobMysqlDatabasePerf {
   }
 
   /**
-   * Generate a random {@link NamedBlobRecord}.
-   * @param random The {@link Random} object to generate random number.
-   * @param accountService The {@link AccountService} object.
-   * @param allAccounts All the accounts in the account service.
-   * @return A {@link NamedBlobRecord}.
-   */
-  private static NamedBlobRecord generateRandomNamedBlobRecord(Random random, AccountService accountService,
-      List<Account> allAccounts) {
-    Account account;
-    Container container;
-    String blobName;
-    if (random.nextFloat() < PERCENTAGE_FOR_HUGE_LIST) {
-      account = accountService.getAccountById(HUGE_LIST_ACCOUNT_ID);
-      container = account.getContainerById(HUGE_LIST_CONTAINER_ID);
-      blobName = HUGE_LIST_COMMON_PREFIX + TestUtils.getRandomString(50);
-    } else {
-      account = allAccounts.get(random.nextInt(allAccounts.size()));
-      List<Container> containers = new ArrayList<>(account.getAllContainers());
-      container = containers.get(random.nextInt(containers.size()));
-      blobName = TestUtils.getRandomString(50);
-    }
-    BlobId blobId =
-        new BlobId(BlobId.BLOB_ID_V6, BlobId.BlobIdType.NATIVE, (byte) 1, account.getId(), container.getId(),
-            PARTITION_ID, false, BlobId.BlobDataType.DATACHUNK);
-    NamedBlobRecord record =
-        new NamedBlobRecord(account.getName(), container.getName(), blobName, blobId.toString(), -1);
-    return record;
-  }
-
-  private static NamedBlobRecord generateRandomNamedBlobRecordForFlink(Random random, AccountService accountService,
-      List<Account> allAccounts) {
-    Account account = allAccounts.get(random.nextInt(allAccounts.size()));
-    List<Container> containers = new ArrayList<>(account.getAllContainers());
-    Container container = containers.get(random.nextInt(containers.size()));
-    String blobName =
-        String.format("checkpoints/%s/chk-900/%s", TestUtils.getRandomString(32), UUID.randomUUID().toString());
-    BlobId blobId =
-        new BlobId(BlobId.BLOB_ID_V6, BlobId.BlobIdType.NATIVE, (byte) 1, account.getId(), container.getId(),
-            PARTITION_ID, false, BlobId.BlobDataType.DATACHUNK);
-    long expirationTime = Utils.addSecondsToEpochTime(System.currentTimeMillis() / 1000, TimeUnit.DAYS.toSeconds(2));
-    NamedBlobRecord record =
-        new NamedBlobRecord(account.getName(), container.getName(), blobName, blobId.toString(), expirationTime);
-    return record;
-  }
-
-  /**
    * Worker class to insert rows into database.
    */
   public static class RowFillWorker implements Runnable {
     private final int id;
     private final NamedBlobDb namedBlobDb;
-    private final AccountService accountService;
     private final List<Account> allAccounts;
     private final long numberOfInsert;
+    private final TestType testType;
     private final AtomicLong trackingRow;
 
     /**
@@ -466,11 +452,11 @@ public class NamedBlobMysqlDatabasePerf {
      * @param numberOfInsert The insert of rows to insert
      * @param trackingRow The {@link AtomicLong} object to keep track of how many rows are inserted.
      */
-    public RowFillWorker(int id, NamedBlobDb namedBlobDb, AccountService accountService, long numberOfInsert,
-        AtomicLong trackingRow) {
+    public RowFillWorker(int id, NamedBlobDb namedBlobDb, TestType testType, AccountService accountService,
+        long numberOfInsert, AtomicLong trackingRow) {
       this.id = id;
       this.namedBlobDb = namedBlobDb;
-      this.accountService = accountService;
+      this.testType = testType;
       this.numberOfInsert = numberOfInsert;
       this.trackingRow = trackingRow;
       allAccounts = new ArrayList<>(accountService.getAllAccounts());
@@ -481,7 +467,7 @@ public class NamedBlobMysqlDatabasePerf {
       ThreadLocalRandom random = ThreadLocalRandom.current();
       try {
         for (long l = 0; l < numberOfInsert; l++) {
-          NamedBlobRecord record = generateRandomNamedBlobRecord(random, accountService, allAccounts);
+          NamedBlobRecord record = testType.generateNewNamedBlobRecord(random, allAccounts);
           namedBlobDb.put(record).get();
           trackingRow.incrementAndGet();
         }
@@ -499,12 +485,10 @@ public class NamedBlobMysqlDatabasePerf {
    * @param executor The {@link ScheduledExecutorService} object.
    * @param accountService The {@link AccountService} object.
    * @param numThreads The number of threads to run performance test
-   * @param includeList True to include list operation in the performance test
    * @throws Exception
    */
-  private static void runPerformanceTest(MetricRegistry registry, NamedBlobDb namedBlobDb,
-      ScheduledExecutorService executor, AccountService accountService, int numThreads, boolean includeList,
-      boolean onlyWrites)
+  private static void runPerformanceTest(MetricRegistry registry, NamedBlobDb namedBlobDb, TestType testType,
+      ScheduledExecutorService executor, AccountService accountService, int numThreads, Properties props)
       throws Exception {
     long numberOfPuts = 1000 * 1000; // 1 million inserts
     System.out.println("Running performance test, number of puts: " + numberOfPuts);
@@ -515,8 +499,9 @@ public class NamedBlobMysqlDatabasePerf {
       if (i == numThreads - 1) {
         num = numberOfPuts - i * numberOfInsertPerWorker;
       }
-      futures.add(
-          executor.submit(new PerformanceTestWorker(i, namedBlobDb, accountService, num, includeList, onlyWrites)));
+      futures.add(executor.submit(
+          (PerformanceTestWorker) testType.getWorkerClass().getConstructors()[0].newInstance(i, namedBlobDb,
+              accountService, num, props)));
     }
     for (Future<?> future : futures) {
       future.get();
@@ -529,43 +514,186 @@ public class NamedBlobMysqlDatabasePerf {
     printHistogramMetric(registry, "com.github.ambry.named.MySqlNamedBlobDb.NamedBlobDeleteTimeInMs");
   }
 
-  /**
-   * This class is the worker class that carries out the performance tests.
-   * There are several tests to be done in this worker
-   * 1. Put, with isUpsert to be true, otherwise, a put operation would run a select and insert query.
-   * 2. Update, update the state for each named blob record
-   * 3. Get, with all the named blob records that are just inserted
-   * 4. Delete, delete is actually an update as well.
-   * 5. List, list a small named blob sets and a huge named blob sets
-   */
-  public static class PerformanceTestWorker implements Runnable {
-    private final int id;
-    private final NamedBlobDb namedBlobDb;
-    private final AccountService accountService;
-    private final List<Account> allAccounts;
-    private final long numberOfPuts;
-    private final boolean includeList;
-    private final boolean onlyWrites;
-    private final List<NamedBlobRecord> allRecords;
+  public static abstract class PerformanceTestWorker implements Runnable {
+    protected final int id;
+    protected final NamedBlobDb namedBlobDb;
+    protected final AccountService accountService;
+    protected final List<Account> allAccounts;
+    protected final long numberOfOperations;
+    protected final Properties props;
 
-    public PerformanceTestWorker(int id, NamedBlobDb namedBlobDb, AccountService accountService, long numberOfPuts,
-        boolean includeList, boolean onlyWrites) {
+    public PerformanceTestWorker(int id, NamedBlobDb namedBlobDb, AccountService accountService, int numberOfOperations,
+        Properties props) {
       this.id = id;
       this.namedBlobDb = namedBlobDb;
       this.accountService = accountService;
-      this.numberOfPuts = numberOfPuts;
-      this.includeList = includeList;
-      this.onlyWrites = onlyWrites;
+      this.numberOfOperations = numberOfOperations;
+      this.props = props;
       allAccounts = new ArrayList<>(accountService.getAllAccounts());
-      allRecords = new ArrayList<>((int) numberOfPuts);
+    }
+  }
+
+  public static class ReadWritePerformanceTestWorker extends PerformanceTestWorker {
+    private final List<NamedBlobRecord> allRecords = new ArrayList<>();
+
+    public ReadWritePerformanceTestWorker(int id, NamedBlobDb namedBlobDb, AccountService accountService,
+        int numberOfOperations, Properties props) {
+      super(id, namedBlobDb, accountService, numberOfOperations, props);
     }
 
     @Override
     public void run() {
       ThreadLocalRandom random = ThreadLocalRandom.current();
       try {
-        for (long l = 1; l <= numberOfPuts; l++) {
-          NamedBlobRecord record = generateRandomNamedBlobRecordForFlink(random, accountService, allAccounts);
+        for (long l = 0; l < numberOfOperations; l++) {
+          NamedBlobRecord record = ReadWritePerformanceTestWorker.generateNewNamedBlobRecord(random, allAccounts);
+          namedBlobDb.put(record, NamedBlobState.IN_PROGRESS, true).get();
+          allRecords.add(record);
+        }
+        System.out.println(
+            "ReadWritePerformanceTestWorker " + id + " finishes writing " + numberOfOperations + " records");
+
+        for (NamedBlobRecord record : allRecords) {
+          namedBlobDb.updateBlobTtlAndStateToReady(record).get();
+        }
+        System.out.println(
+            "ReadWritePerformanceTestWorker " + id + " finishes updating " + numberOfOperations + " records");
+
+        for (NamedBlobRecord record : allRecords) {
+          namedBlobDb.get(record.getAccountName(), record.getContainerName(), record.getBlobName()).get();
+        }
+        System.out.println(
+            "ReadWritePerformanceTestWorker " + id + " finishes reading " + numberOfOperations + " records");
+
+        for (NamedBlobRecord record : allRecords) {
+          namedBlobDb.delete(record.getAccountName(), record.getContainerName(), record.getBlobName()).get();
+        }
+        System.out.println(
+            "ReadWritePerformanceTestWorker " + id + " finishes deleting " + numberOfOperations + " records");
+      } catch (Exception e) {
+        System.out.println("ReadWritePerformanceTestWorker " + id + " has som exception " + e);
+      }
+    }
+
+    /**
+     * Get total number of rows of the target table.
+     * @param datasource Datasource to execute query on.
+     * @return Total number of rows
+     * @throws Exception
+     */
+    public static long getNumberOfExistingRows(DataSource datasource) throws Exception {
+      String rowQuerySql = "SELECT COUNT(*) as total FROM " + TABLE_NAME;
+      long numberOfRows = 0;
+      try (Connection connection = datasource.getConnection()) {
+        try (PreparedStatement queryStatement = connection.prepareStatement(rowQuerySql)) {
+          try (ResultSet result = queryStatement.executeQuery()) {
+            while (result.next()) {
+              numberOfRows = result.getLong("total");
+            }
+          }
+        }
+      }
+      return numberOfRows;
+    }
+
+    /**
+     * Generate a random {@link NamedBlobRecord}.
+     * @param random The {@link Random} object to generate random number.
+     * @param allAccounts All the accounts in the account service.
+     * @return A {@link NamedBlobRecord}.
+     */
+    public static NamedBlobRecord generateNewNamedBlobRecord(Random random, List<Account> allAccounts) {
+      Account account = allAccounts.get(random.nextInt(allAccounts.size()));
+      List<Container> containers = new ArrayList<>(account.getAllContainers());
+      Container container = containers.get(random.nextInt(containers.size()));
+      String blobName = TestUtils.getRandomString(50);
+      BlobId blobId =
+          new BlobId(BlobId.BLOB_ID_V6, BlobId.BlobIdType.NATIVE, (byte) 1, account.getId(), container.getId(),
+              PARTITION_ID, false, BlobId.BlobDataType.DATACHUNK);
+      NamedBlobRecord record =
+          new NamedBlobRecord(account.getName(), container.getName(), blobName, blobId.toString(), -1);
+      return record;
+    }
+  }
+
+  public static class ListPerformanceTestWorker extends PerformanceTestWorker {
+
+    public ListPerformanceTestWorker(int id, NamedBlobDb namedBlobDb, AccountService accountService,
+        int numberOfOperations, Properties props) {
+      super(id, namedBlobDb, accountService, numberOfOperations, props);
+    }
+
+    @Override
+    public void run() {
+      try {
+        for (int i = 0; i < numberOfOperations; i++) {
+          Page<NamedBlobRecord> page = null;
+          String token = null;
+          do {
+            page =
+                namedBlobDb.list(HUGE_LIST_ACCOUNT_NAME, HUGE_LIST_CONTAINER_NAME, HUGE_LIST_COMMON_PREFIX, null, null)
+                    .get();
+            token = page.getNextPageToken();
+          } while (token != null);
+          if (i % 100 == 0) {
+            System.out.println("ListPerformanceTestWorker " + id + " finishes " + i + " operations");
+          }
+        }
+      } catch (Exception e) {
+        System.out.println("ListPerformanceTestWorker " + id + " has som exception " + e);
+      }
+    }
+
+    public static long getNumberOfExistingRows(DataSource datasource) throws Exception {
+      String rowQuerySql = "SELECT COUNT(*) as total FROM " + TABLE_NAME
+          + " WHERE account_id = ? And container_id = ? and BLOB_NAME like ?";
+      long numberOfRows = 0;
+      try (Connection connection = datasource.getConnection()) {
+        try (PreparedStatement queryStatement = connection.prepareStatement(rowQuerySql)) {
+          queryStatement.setInt(1, HUGE_LIST_ACCOUNT_ID);
+          queryStatement.setInt(2, HUGE_LIST_CONTAINER_ID);
+          queryStatement.setString(3, HUGE_LIST_COMMON_PREFIX + "%");
+          try (ResultSet result = queryStatement.executeQuery()) {
+            while (result.next()) {
+              numberOfRows = result.getLong("total");
+            }
+          }
+        }
+      }
+      return numberOfRows;
+    }
+
+    /**
+     * Generate a random {@link NamedBlobRecord}.
+     * @param random The {@link Random} object to generate random number.
+     * @param allAccounts All the accounts in the account service.
+     * @return A {@link NamedBlobRecord}.
+     */
+    public static NamedBlobRecord generateNewNamedBlobRecord(Random random, List<Account> allAccounts) {
+      String blobName = String.format(HUGE_LIST_TEMPLATE, UUID.randomUUID(), TestUtils.getRandomString(32));
+      BlobId blobId = new BlobId(BlobId.BLOB_ID_V6, BlobId.BlobIdType.NATIVE, (byte) 1, HUGE_LIST_ACCOUNT_ID,
+          HUGE_LIST_CONTAINER_ID, PARTITION_ID, false, BlobId.BlobDataType.DATACHUNK);
+      NamedBlobRecord record =
+          new NamedBlobRecord(HUGE_LIST_ACCOUNT_NAME, HUGE_LIST_CONTAINER_NAME, blobName, blobId.toString(), -1);
+      return record;
+    }
+  }
+
+  public static class CustomPerformanceTestWorker extends PerformanceTestWorker {
+    private final boolean onlyWrites;
+
+    public CustomPerformanceTestWorker(int id, NamedBlobDb namedBlobDb, AccountService accountService,
+        int numberOfOperations, Properties props) {
+      super(id, namedBlobDb, accountService, numberOfOperations, props);
+      this.onlyWrites = props.getProperty(ONLY_WRITES).equalsIgnoreCase("true");
+    }
+
+    @Override
+    public void run() {
+      ThreadLocalRandom random = ThreadLocalRandom.current();
+      try {
+        for (long l = 1; l <= numberOfOperations; l++) {
+          NamedBlobRecord record = CustomPerformanceTestWorker.generateNewNamedBlobRecord(random, allAccounts);
           if (!onlyWrites) {
             try {
               namedBlobDb.get(record.getAccountName(), record.getContainerName(), record.getBlobName()).get();
@@ -589,13 +717,32 @@ public class NamedBlobMysqlDatabasePerf {
           // Now delete
           namedBlobDb.delete(record.getAccountName(), record.getContainerName(), record.getBlobName()).get();
           if (l % 100 == 0) {
-            System.out.println("PerformanceTestWorker " + id + " finishes " + l + " records");
+            System.out.println("CustomPerformanceTestWorker " + id + " finishes " + l + " records");
           }
         }
-        System.out.println("PerformanceTestWorker " + id + " finishes " + numberOfPuts + " records");
+        System.out.println("CustomPerformanceTestWorker " + id + " finishes " + numberOfOperations + " records");
       } catch (Exception e) {
-        System.out.println("PerformanceTestWorker " + id + " has som exception " + e);
+        System.out.println("CustomPerformanceTestWorker " + id + " has som exception " + e);
       }
+    }
+
+    public static long getNumberOfExistingRows(DataSource datasource) throws Exception {
+      return 0L;
+    }
+
+    public static NamedBlobRecord generateNewNamedBlobRecord(Random random, List<Account> allAccounts) {
+      Account account = allAccounts.get(random.nextInt(allAccounts.size()));
+      List<Container> containers = new ArrayList<>(account.getAllContainers());
+      Container container = containers.get(random.nextInt(containers.size()));
+      String blobName =
+          String.format("checkpoints/%s/chk-900/%s", TestUtils.getRandomString(32), UUID.randomUUID().toString());
+      BlobId blobId =
+          new BlobId(BlobId.BLOB_ID_V6, BlobId.BlobIdType.NATIVE, (byte) 1, account.getId(), container.getId(),
+              PARTITION_ID, false, BlobId.BlobDataType.DATACHUNK);
+      long expirationTime = Utils.addSecondsToEpochTime(System.currentTimeMillis() / 1000, TimeUnit.DAYS.toSeconds(2));
+      NamedBlobRecord record =
+          new NamedBlobRecord(account.getName(), container.getName(), blobName, blobId.toString(), expirationTime);
+      return record;
     }
   }
 }
