@@ -45,7 +45,9 @@ import java.sql.ResultSet;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Properties;
 import java.util.Random;
 import java.util.UUID;
@@ -95,7 +97,7 @@ import org.json.JSONArray;
  *  parallelism=10
  *  target_rows=10
  *  num_operations=1000000
- *  perf_test=list_test
+ *  test_type=LIST
  *  > java -cp "*" com.github.ambry.tools.perf.NamedBlobMysqlDatabasePerf --props named_blob.props
  */
 public class NamedBlobMysqlDatabasePerf {
@@ -129,25 +131,18 @@ public class NamedBlobMysqlDatabasePerf {
   public static final String ONLY_WRITES = "custom.only_writes";
 
   public enum TestType {
-    READ_WRITE {
-      @Override
-      public Class<? extends PerformanceTestWorker> getWorkerClass() {
-        return ReadWritePerformanceTestWorker.class;
-      }
-    }, LIST {
-      @Override
-      public Class<? extends PerformanceTestWorker> getWorkerClass() {
-        return ListPerformanceTestWorker.class;
-      }
-    }, CUSTOM {
-      @Override
-      public Class<? extends PerformanceTestWorker> getWorkerClass() {
-        return CustomPerformanceTestWorker.class;
+    READ_WRITE, LIST, CUSTOM;
+
+    static final Map<TestType, Class> workerClassMap = new HashMap<TestType, Class>() {
+      {
+        put(READ_WRITE, ReadWritePerformanceTestWorker.class);
+        put(LIST, ListPerformanceTestWorker.class);
+        put(CUSTOM, CustomPerformanceTestWorker.class);
       }
     };
 
     public long getExistingRows(DataSource dataSource) throws Exception {
-      Class<?> clazz = getWorkerClass();
+      Class<?> clazz = workerClassMap.get(this);
       Method method = clazz.getDeclaredMethod("getNumberOfExistingRows", DataSource.class);
       Object object = method.invoke(null, dataSource);
       if (object instanceof Long) {
@@ -158,7 +153,7 @@ public class NamedBlobMysqlDatabasePerf {
     }
 
     public NamedBlobRecord generateNewNamedBlobRecord(Random random, List<Account> allAccounts) throws Exception {
-      Class<?> clazz = getWorkerClass();
+      Class<?> clazz = workerClassMap.get(this);
       Method method = clazz.getDeclaredMethod("generateNewNamedBlobRecord", Random.class, List.class);
       Object object = method.invoke(null, random, allAccounts);
       if (object instanceof NamedBlobRecord) {
@@ -168,7 +163,9 @@ public class NamedBlobMysqlDatabasePerf {
       }
     }
 
-    public abstract <T extends PerformanceTestWorker> Class<T> getWorkerClass();
+    public Class getWorkerClass() {
+      return workerClassMap.get(this);
+    }
   }
 
   public static void main(String[] args) throws Exception {
@@ -490,18 +487,18 @@ public class NamedBlobMysqlDatabasePerf {
   private static void runPerformanceTest(MetricRegistry registry, NamedBlobDb namedBlobDb, TestType testType,
       ScheduledExecutorService executor, AccountService accountService, int numThreads, Properties props)
       throws Exception {
-    long numberOfPuts = 1000 * 1000; // 1 million inserts
-    System.out.println("Running performance test, number of puts: " + numberOfPuts);
-    long numberOfInsertPerWorker = numberOfPuts / numThreads;
+    int numberOfOperations = Integer.valueOf(props.getProperty(NUM_OPERATIONS));
+    System.out.println("Running performance test, number of puts: " + numberOfOperations);
+    int numberOfInsertPerWorker = numberOfOperations / numThreads;
     List<Future<?>> futures = new ArrayList<>();
     for (int i = 0; i < numThreads; i++) {
-      long num = numberOfInsertPerWorker;
+      int num = numberOfInsertPerWorker;
       if (i == numThreads - 1) {
-        num = numberOfPuts - i * numberOfInsertPerWorker;
+        num = numberOfOperations - i * numberOfInsertPerWorker;
       }
-      futures.add(executor.submit(
-          (PerformanceTestWorker) testType.getWorkerClass().getConstructors()[0].newInstance(i, namedBlobDb,
-              accountService, num, props)));
+      futures.add(executor.submit((PerformanceTestWorker) testType.getWorkerClass()
+          .getConstructor(int.class, NamedBlobDb.class, AccountService.class, int.class, Properties.class)
+          .newInstance(i, namedBlobDb, accountService, num, props)));
     }
     for (Future<?> future : futures) {
       future.get();
