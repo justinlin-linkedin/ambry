@@ -628,7 +628,7 @@ public class NamedBlobMysqlDatabasePerf {
           String token = null;
           do {
             page =
-                namedBlobDb.list(HUGE_LIST_ACCOUNT_NAME, HUGE_LIST_CONTAINER_NAME, HUGE_LIST_COMMON_PREFIX, null, null)
+                namedBlobDb.list(HUGE_LIST_ACCOUNT_NAME, HUGE_LIST_CONTAINER_NAME, HUGE_LIST_COMMON_PREFIX, token, null)
                     .get();
             token = page.getNextPageToken();
           } while (token != null);
