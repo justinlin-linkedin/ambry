@@ -141,7 +141,7 @@ public class NamedBlobMysqlDatabasePerf {
       }
     };
 
-    public long getExistingRows(DataSource dataSource) throws Exception {
+    public long getNumberOfExistingRows(DataSource dataSource) throws Exception {
       Class<?> clazz = workerClassMap.get(this);
       Method method = clazz.getDeclaredMethod("getNumberOfExistingRows", DataSource.class);
       Object object = method.invoke(null, dataSource);
@@ -201,8 +201,8 @@ public class NamedBlobMysqlDatabasePerf {
             .describedAs("parallelism")
             .ofType(Integer.class);
 
-    ArgumentAcceptingOptionSpec<TestType> testTypeOpt =
-        parser.accepts(TEST_TYPE, "Perf test type").withRequiredArg().describedAs("test_type").ofType(TestType.class);
+    ArgumentAcceptingOptionSpec<String> testTypeOpt =
+        parser.accepts(TEST_TYPE, "Perf test type").withRequiredArg().describedAs("test_type").ofType(String.class);
 
     ArgumentAcceptingOptionSpec<Integer> numOperationsOpt =
         parser.accepts(NUM_OPERATIONS, "Number of operations to run in the performance test")
@@ -248,8 +248,8 @@ public class NamedBlobMysqlDatabasePerf {
     if (options.has(parallelismOpt)) {
       props.setProperty(PARALLELISM, String.valueOf(options.valueOf(parallelismOpt)));
     }
-    if (options.has(testTypeOpt)) {
-      props.put(TEST_TYPE, options.valueOf(testTypeOpt));
+    if (options.has(targetMRowsOpt)) {
+      props.put(TARGET_ROWS, options.valueOf(targetMRowsOpt));
     }
     if (options.has(testTypeOpt)) {
       props.put(TEST_TYPE, options.valueOf(testTypeOpt));
@@ -316,7 +316,7 @@ public class NamedBlobMysqlDatabasePerf {
         new MySqlNamedBlobDbFactory(new VerifiableProperties(newProperties), registry, accountService);
     DataSource dataSource = factory.buildDataSource(dbEndpoint);
     NamedBlobDb namedBlobDb = factory.getNamedBlobDb();
-    TestType testType = (TestType) props.get(TEST_TYPE);
+    TestType testType = TestType.valueOf(props.getProperty(TEST_TYPE));
 
     prepareDatabaseForPerfTest(testType, registry, namedBlobDb, dataSource, executor, accountService, props);
     runPerformanceTest(registry, namedBlobDb, testType, executor, accountService, numThreads, props);
@@ -377,7 +377,7 @@ public class NamedBlobMysqlDatabasePerf {
       throws Exception {
     // First, fill the database with target number of rows
     long targetRows = Long.valueOf(props.getProperty(TARGET_ROWS)) * 1000000L;
-    long existingRows = testType.getExistingRows(dataSource);
+    long existingRows = testType.getNumberOfExistingRows(dataSource);
     if (existingRows >= targetRows) {
       System.out.println("Existing number of rows: " + existingRows + ", more than target number of rows: " + targetRows
           + ", skip filling database rows");
@@ -511,6 +511,9 @@ public class NamedBlobMysqlDatabasePerf {
     printHistogramMetric(registry, "com.github.ambry.named.MySqlNamedBlobDb.NamedBlobDeleteTimeInMs");
   }
 
+  /**
+   * A base class for performance test worker
+   */
   public static abstract class PerformanceTestWorker implements Runnable {
     protected final int id;
     protected final NamedBlobDb namedBlobDb;
@@ -530,6 +533,9 @@ public class NamedBlobMysqlDatabasePerf {
     }
   }
 
+  /**
+   * A performance worker class to do all point lookup operations for named blob, includin put, get, update and delete.
+   */
   public static class ReadWritePerformanceTestWorker extends PerformanceTestWorker {
     private final List<NamedBlobRecord> allRecords = new ArrayList<>();
 
@@ -594,7 +600,7 @@ public class NamedBlobMysqlDatabasePerf {
     }
 
     /**
-     * Generate a random {@link NamedBlobRecord}.
+     * Generate a random {@link NamedBlobRecord} for ReadWritePerformanceTestWorker.
      * @param random The {@link Random} object to generate random number.
      * @param allAccounts All the accounts in the account service.
      * @return A {@link NamedBlobRecord}.
@@ -613,6 +619,10 @@ public class NamedBlobMysqlDatabasePerf {
     }
   }
 
+  /**
+   * A performance worker for list operation for named blob db. The worker thread would iterate over all the blob names
+   * with a give prefix under the given account and container.
+   */
   public static class ListPerformanceTestWorker extends PerformanceTestWorker {
 
     public ListPerformanceTestWorker(int id, NamedBlobDb namedBlobDb, AccountService accountService,
@@ -641,6 +651,12 @@ public class NamedBlobMysqlDatabasePerf {
       }
     }
 
+    /**
+     * Get total number of rows for that starts with the list prefix under the given account and container.
+     * @param datasource Datasource to execute query on.
+     * @return Total number of rows
+     * @throws Exception
+     */
     public static long getNumberOfExistingRows(DataSource datasource) throws Exception {
       String rowQuerySql = "SELECT COUNT(*) as total FROM " + TABLE_NAME
           + " WHERE account_id = ? And container_id = ? and BLOB_NAME like ?";
@@ -661,7 +677,7 @@ public class NamedBlobMysqlDatabasePerf {
     }
 
     /**
-     * Generate a random {@link NamedBlobRecord}.
+     * Generate a random {@link NamedBlobRecord} for list operation.
      * @param random The {@link Random} object to generate random number.
      * @param allAccounts All the accounts in the account service.
      * @return A {@link NamedBlobRecord}.
@@ -676,6 +692,10 @@ public class NamedBlobMysqlDatabasePerf {
     }
   }
 
+  /**
+   * A performance worker for custom operation set for named blob db. This worker does a set of operations as you defined
+   * in the method.
+   */
   public static class CustomPerformanceTestWorker extends PerformanceTestWorker {
     private final boolean onlyWrites;
 
@@ -723,10 +743,22 @@ public class NamedBlobMysqlDatabasePerf {
       }
     }
 
+    /**
+     * Just return 0 here.
+     * @param datasource
+     * @return
+     * @throws Exception
+     */
     public static long getNumberOfExistingRows(DataSource datasource) throws Exception {
       return 0L;
     }
 
+    /**
+     * Generate a random {@link NamedBlobRecord} for custom operation.
+     * @param random The {@link Random} object to generate random number.
+     * @param allAccounts All the accounts in the account service.
+     * @return A {@link NamedBlobRecord}.
+     */
     public static NamedBlobRecord generateNewNamedBlobRecord(Random random, List<Account> allAccounts) {
       Account account = allAccounts.get(random.nextInt(allAccounts.size()));
       List<Container> containers = new ArrayList<>(account.getAllContainers());
